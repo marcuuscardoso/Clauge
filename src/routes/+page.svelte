@@ -18,6 +18,10 @@
   let usageLimits = $state(null);
   let sessionKeyInput = $state('');
   let appVersion = $state('');
+  let updateReady = $state(null); // { version, body } — only set after download complete
+  let showUpdateModal = $state(false);
+  let showWhatsNew = $state(false);
+  let whatsNewBody = $state('');
   let sessionKeyConfigured = $state(false);
   let showKeyEdit = $state(false);
   let usageRefreshInterval = null;
@@ -376,6 +380,68 @@
     }
   }
 
+  let pendingUpdate = null; // holds the downloaded update object
+
+  async function checkAndDownloadUpdate() {
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      if (!update) return;
+
+      // Check if we already downloaded this version
+      const downloaded = typeof localStorage !== 'undefined' ? localStorage.getItem('clauge-downloaded-update') : null;
+      if (downloaded === update.version) {
+        // Already downloaded but user chose "Later" — just show the hint
+        updateReady = { version: update.version, body: update.body || '' };
+        pendingUpdate = update;
+        return;
+      }
+
+      // Download silently in background
+      await update.download();
+      pendingUpdate = update;
+      updateReady = { version: update.version, body: update.body || '' };
+
+      // Mark as downloaded so we don't re-download on next restart
+      if (typeof localStorage !== 'undefined') localStorage.setItem('clauge-downloaded-update', update.version);
+    } catch(e) {
+      // Silently ignore — no update or network issue
+    }
+  }
+
+  async function restartToUpdate() {
+    if (!pendingUpdate) {
+      // No real update — in production this won't happen
+      statusMsg = "Restarting...";
+      return;
+    }
+    try {
+      await pendingUpdate.install();
+      if (typeof localStorage !== 'undefined') localStorage.removeItem('clauge-downloaded-update');
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch(e) {
+      statusMsg = "Restart failed: " + e;
+    }
+  }
+
+  function checkWhatsNew(version) {
+    const lastSeen = typeof localStorage !== 'undefined' ? localStorage.getItem('clauge-last-seen-version') : null;
+    if (lastSeen && lastSeen !== version) {
+      // Version changed since last launch — fetch release notes
+      fetch(`https://api.github.com/repos/ansxuman/Clauge/releases/tags/v${version}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          if (data?.body) {
+            whatsNewBody = data.body;
+            showWhatsNew = true;
+          }
+        })
+        .catch(() => {});
+    }
+    if (typeof localStorage !== 'undefined') localStorage.setItem('clauge-last-seen-version', version);
+  }
+
   function openExternal(url) {
     import("@tauri-apps/plugin-opener").then(m => m.openUrl(url)).catch(() => window.open(url, "_blank"));
   }
@@ -412,11 +478,13 @@
 
 
   onMount(() => {
-    const t0 = performance.now();
-    console.log(`[TIMING] onMount start`);
-
     applyTheme(currentTheme);
-    invoke("get_app_version").then(v => appVersion = v).catch(() => {});
+    invoke("get_app_version").then(v => {
+      appVersion = v;
+      checkWhatsNew(v);
+      checkAndDownloadUpdate();
+    }).catch(() => {});
+
 
     // Priority 1: Load profiles (fast, <10ms)
     loadProfiles();
@@ -530,24 +598,36 @@
   </div>
 </div>
 <div class="bottom-bar">
-  {#if usageLimits}
-    {@const sColor = usageLimits.sessionPercent > 80 ? '#f85149' : usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}
-    {@const wColor = usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}
-    <div class="usage-chip"><span class="usage-dot" style="background:{sColor};box-shadow:0 0 6px {sColor}44;"></span><span class="usage-lbl">Session</span><span class="usage-val" style="color:{sColor}">{usageLimits.sessionPercent.toFixed(0)}%</span></div>
-    <div class="usage-sep"></div>
-    <div class="usage-chip"><span class="usage-dot" style="background:{wColor};box-shadow:0 0 6px {wColor}44;"></span><span class="usage-lbl">Weekly</span><span class="usage-val" style="color:{wColor}">{usageLimits.weeklyAllPercent.toFixed(0)}%</span></div>
-    {#if usageLimits.weeklySonnetPercent != null}
-      {@const snColor = usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageLimits.weeklySonnetPercent > 50 ? '#d29922' : '#d2a8ff'}
-      <div class="usage-sep"></div>
-      <div class="usage-chip"><span class="usage-dot" style="background:{snColor};box-shadow:0 0 6px {snColor}44;"></span><span class="usage-lbl">Sonnet</span><span class="usage-val" style="color:{snColor}">{usageLimits.weeklySonnetPercent.toFixed(0)}%</span></div>
+  <div class="bottom-left">
+    {#if updateReady}
+      <button class="update-hint" onclick={() => showWhatsNew = true} title="Update available — v{updateReady.version}">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="var(--accent)"><path d="M4.22 9.72a.75.75 0 010-1.06l3.25-3.25a.75.75 0 011.06 0l3.25 3.25a.75.75 0 01-1.06 1.06L8.75 7.69V13.5a.75.75 0 01-1.5 0V7.69L5.28 9.72a.75.75 0 01-1.06 0zM2.75 3.5a.75.75 0 010-1.5h10.5a.75.75 0 010 1.5H2.75z"/></svg>
+        <span class="update-dot"></span>
+      </button>
     {/if}
-  {:else}
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-    <span class="limit-loading" onclick={() => { showSettings = true; settingsTab = 'usage'; }} style="cursor:pointer;">
-      Set up usage tracking in Settings
-    </span>
-  {/if}
-  {#if appVersion}<span class="bottom-version">v{appVersion}</span>{/if}
+  </div>
+  <div class="bottom-center">
+    {#if usageLimits}
+      {@const sColor = usageLimits.sessionPercent > 80 ? '#f85149' : usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}
+      {@const wColor = usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}
+      <div class="usage-chip"><span class="usage-dot" style="background:{sColor};box-shadow:0 0 6px {sColor}44;"></span><span class="usage-lbl">Session</span><span class="usage-val" style="color:{sColor}">{usageLimits.sessionPercent.toFixed(0)}%</span></div>
+      <div class="usage-sep"></div>
+      <div class="usage-chip"><span class="usage-dot" style="background:{wColor};box-shadow:0 0 6px {wColor}44;"></span><span class="usage-lbl">Weekly</span><span class="usage-val" style="color:{wColor}">{usageLimits.weeklyAllPercent.toFixed(0)}%</span></div>
+      {#if usageLimits.weeklySonnetPercent != null}
+        {@const snColor = usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'}
+        <div class="usage-sep"></div>
+        <div class="usage-chip"><span class="usage-dot" style="background:{snColor};box-shadow:0 0 6px {snColor}44;"></span><span class="usage-lbl">Sonnet</span><span class="usage-val" style="color:{snColor}">{usageLimits.weeklySonnetPercent.toFixed(0)}%</span></div>
+      {/if}
+    {:else}
+      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+      <span class="limit-loading" onclick={() => { showSettings = true; settingsTab = 'usage'; }} style="cursor:pointer;">
+        Set up usage tracking in Settings
+      </span>
+    {/if}
+  </div>
+  <div class="bottom-right">
+    {#if appVersion}<span class="bottom-version">v{appVersion}</span>{/if}
+  </div>
 </div>
 </div>
 
@@ -684,6 +764,44 @@
 </div>
 {/if}
 
+{#if showWhatsNew}
+<div class="modal-backdrop">
+  <div class="modal whats-new-modal">
+    {#if updateReady}
+      <h2>v{updateReady.version}</h2>
+      <div class="whats-new-body">{@html (updateReady.body || '')
+        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\n\n/g, '<br>')
+      }</div>
+      <div class="modal-actions">
+        <button onclick={() => showWhatsNew = false}>Later</button>
+        <button class="create-btn" onclick={() => { showWhatsNew = false; restartToUpdate(); }}>Restart</button>
+      </div>
+    {:else}
+      <h2>What's New in v{appVersion}</h2>
+      <div class="whats-new-body">{@html whatsNewBody
+        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\n\n/g, '<br>')
+      }</div>
+      <div class="modal-actions">
+        <button onclick={() => showWhatsNew = false}>Got it</button>
+      </div>
+    {/if}
+  </div>
+</div>
+{/if}
+
+
 <style>
   :global(:root) {
     --sidebar-bg: rgba(22, 27, 34, 0.75);
@@ -735,14 +853,31 @@
   .badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 10px; }
   .wt-badge { font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: rgba(210, 168, 255, 0.2); color: #d2a8ff; letter-spacing: 0.5px; }
   .time { font-size: 11px; color: var(--text-secondary); }
-  .bottom-bar { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 5px 16px; background: var(--sidebar-bg); border-top: 1px solid var(--border); flex-shrink: 0; position: relative; }
-  .bottom-version { position: absolute; right: 16px; font-size: 9px; color: var(--text-secondary); font-family: monospace; opacity: 0.4; }
+  .bottom-bar { display: flex; align-items: center; padding: 5px 16px; background: var(--sidebar-bg); border-top: 1px solid var(--border); flex-shrink: 0; }
+  .bottom-left { width: 120px; flex-shrink: 0; }
+  .bottom-center { flex: 1; display: flex; align-items: center; justify-content: center; gap: 12px; }
+  .bottom-right { width: 120px; flex-shrink: 0; text-align: right; }
+  .bottom-version { font-size: 9px; color: var(--text-secondary); font-family: monospace; opacity: 0.4; }
+  .update-hint { display: flex; align-items: center; gap: 4px; border: none; background: none; color: var(--accent); font-size: 10px; font-family: inherit; cursor: pointer; padding: 0; transition: opacity 0.15s; }
+  .update-hint:hover { opacity: 0.7; }
+  .update-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 50%, transparent); animation: pulse 2s ease-in-out infinite; }
   .usage-chip { display: flex; align-items: center; gap: 5px; }
   .usage-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
   .usage-lbl { font-size: 10px; color: var(--text-secondary); font-weight: 500; }
   .usage-val { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .usage-sep { width: 1px; height: 10px; background: var(--border); opacity: 0.5; }
   .limit-loading { font-size: 10px; color: var(--text-secondary); }
+
+
+  .whats-new-modal { max-height: 70vh; display: flex; flex-direction: column; }
+  .whats-new-body { flex: 1; overflow-y: auto; font-size: 13px; color: var(--text-secondary); line-height: 1.7; padding: 4px 0 12px; }
+  .whats-new-body :global(h2) { font-size: 15px; color: var(--text-primary); margin: 14px 0 6px; font-weight: 600; }
+  .whats-new-body :global(h3) { font-size: 15px; color: var(--text-primary); margin: 14px 0 6px; font-weight: 600; }
+  .whats-new-body :global(h4) { font-size: 13px; color: var(--text-primary); margin: 10px 0 4px; font-weight: 500; }
+  .whats-new-body :global(ul) { padding-left: 16px; margin: 4px 0; }
+  .whats-new-body :global(li) { margin-bottom: 3px; }
+  .whats-new-body :global(code) { font-family: monospace; font-size: 11px; background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 3px; }
+  .whats-new-body :global(strong) { color: var(--text-primary); font-weight: 600; }
   .session-key-setup, .key-status { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
   .key-status-row { display: flex; align-items: center; gap: 8px; }
   .key-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
@@ -798,7 +933,7 @@
   .chip.selected { font-weight: 600; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   .modal-actions button { padding: 7px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid var(--border); background: var(--btn-bg, #21262d); color: var(--text-primary); font-family: inherit; }
-  .create-btn { background: #238636 !important; border-color: transparent !important; color: #fff !important; }
+  .create-btn { background: var(--accent) !important; border-color: transparent !important; color: #fff !important; }
   .create-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #484f58; margin-right: 6px; vertical-align: middle; transition: background 0.3s; }
