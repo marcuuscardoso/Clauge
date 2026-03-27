@@ -531,30 +531,15 @@
 </div>
 <div class="bottom-bar">
   {#if usageLimits}
-    <div class="limit-meter">
-      <span class="limit-label">Session</span>
-      <div class="limit-track">
-        <div class="limit-fill" style="width:{usageLimits.sessionPercent}%;background:{usageLimits.sessionPercent > 80 ? '#f85149' : usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}"></div>
-      </div>
-      <span class="limit-pct">{usageLimits.sessionPercent.toFixed(0)}%</span>
-    </div>
-    <div class="limit-sep"></div>
-    <div class="limit-meter">
-      <span class="limit-label">Weekly</span>
-      <div class="limit-track">
-        <div class="limit-fill" style="width:{usageLimits.weeklyAllPercent}%;background:{usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}"></div>
-      </div>
-      <span class="limit-pct">{usageLimits.weeklyAllPercent.toFixed(0)}%</span>
-    </div>
+    {@const sColor = usageLimits.sessionPercent > 80 ? '#f85149' : usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}
+    {@const wColor = usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}
+    <div class="usage-chip"><span class="usage-dot" style="background:{sColor};box-shadow:0 0 6px {sColor}44;"></span><span class="usage-lbl">Session</span><span class="usage-val" style="color:{sColor}">{usageLimits.sessionPercent.toFixed(0)}%</span></div>
+    <div class="usage-sep"></div>
+    <div class="usage-chip"><span class="usage-dot" style="background:{wColor};box-shadow:0 0 6px {wColor}44;"></span><span class="usage-lbl">Weekly</span><span class="usage-val" style="color:{wColor}">{usageLimits.weeklyAllPercent.toFixed(0)}%</span></div>
     {#if usageLimits.weeklySonnetPercent != null}
-      <div class="limit-sep"></div>
-      <div class="limit-meter">
-        <span class="limit-label">Sonnet</span>
-        <div class="limit-track">
-          <div class="limit-fill" style="width:{usageLimits.weeklySonnetPercent}%;background:{usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'}"></div>
-        </div>
-        <span class="limit-pct">{usageLimits.weeklySonnetPercent.toFixed(0)}%</span>
-      </div>
+      {@const snColor = usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageLimits.weeklySonnetPercent > 50 ? '#d29922' : '#d2a8ff'}
+      <div class="usage-sep"></div>
+      <div class="usage-chip"><span class="usage-dot" style="background:{snColor};box-shadow:0 0 6px {snColor}44;"></span><span class="usage-lbl">Sonnet</span><span class="usage-val" style="color:{snColor}">{usageLimits.weeklySonnetPercent.toFixed(0)}%</span></div>
     {/if}
   {:else}
     <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
@@ -750,16 +735,13 @@
   .badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 10px; }
   .wt-badge { font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: rgba(210, 168, 255, 0.2); color: #d2a8ff; letter-spacing: 0.5px; }
   .time { font-size: 11px; color: var(--text-secondary); }
-  .bottom-bar { display: flex; align-items: center; gap: 16px; padding: 4px 16px; background: var(--sidebar-bg); border-top: 1px solid var(--border); flex-shrink: 0; }
-  .bottom-link { display: flex; align-items: center; gap: 4px; border: none; background: none; color: var(--text-secondary); font-size: 10px; font-family: inherit; cursor: pointer; padding: 2px 0; transition: color 0.15s; white-space: nowrap; }
-  .bottom-link:hover { color: var(--accent); }
-  .bottom-version { margin-left: auto; font-size: 10px; color: var(--text-secondary); font-family: monospace; opacity: 0.6; white-space: nowrap; }
-  .limit-meter { display: flex; align-items: center; gap: 6px; }
-  .limit-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.3px; width: 42px; }
-  .limit-track { width: 100px; height: 4px; background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden; }
-  .limit-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
-  .limit-pct { font-size: 11px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; width: 30px; text-align: right; }
-  .limit-sep { width: 1px; height: 12px; background: var(--border); }
+  .bottom-bar { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 5px 16px; background: var(--sidebar-bg); border-top: 1px solid var(--border); flex-shrink: 0; }
+  .bottom-version { position: absolute; right: 16px; font-size: 9px; color: var(--text-secondary); font-family: monospace; opacity: 0.4; }
+  .usage-chip { display: flex; align-items: center; gap: 5px; }
+  .usage-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .usage-lbl { font-size: 10px; color: var(--text-secondary); font-weight: 500; }
+  .usage-val { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .usage-sep { width: 1px; height: 10px; background: var(--border); opacity: 0.5; }
   .limit-loading { font-size: 10px; color: var(--text-secondary); }
   .session-key-setup, .key-status { margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
   .key-status-row { display: flex; align-items: center; gap: 8px; }
