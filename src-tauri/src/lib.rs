@@ -27,6 +27,10 @@ pub struct SessionProfile {
     pub context_prompt: String,
     pub created_at: String,
     pub last_used_at: String,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +236,8 @@ fn create_profile(title: String, purpose: String, project_path: String) -> Resul
         context_prompt: get_context_prompt(&purpose),
         created_at: now.clone(),
         last_used_at: now,
+        worktree_path: None,
+        worktree_branch: None,
     };
 
     profiles.push(profile.clone());
@@ -301,6 +307,104 @@ fn update_session_id(id: String, claude_session_id: String) -> Result<(), String
     }
     save_profiles(&profiles)?;
     Ok(())
+}
+
+/// Check if a path is inside a git repo
+#[tauri::command]
+fn is_git_repo(path: String) -> Result<bool, String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", &path, "rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(output.status.success())
+}
+
+/// Create a git worktree for session isolation
+#[tauri::command]
+fn create_worktree(project_path: String, branch_name: String) -> Result<String, String> {
+    // Worktree goes inside a hidden directory in the project
+    let worktree_dir = PathBuf::from(&project_path)
+        .join(".clauge-worktrees")
+        .join(&branch_name);
+    let worktree_path = worktree_dir.to_string_lossy().to_string();
+
+    // Create parent dir
+    let _ = std::fs::create_dir_all(worktree_dir.parent().unwrap_or(&worktree_dir));
+
+    // Create worktree with new branch
+    let output = std::process::Command::new("git")
+        .args(["-C", &project_path, "worktree", "add", "-b", &branch_name, &worktree_path])
+        .output()
+        .map_err(|e| format!("git worktree add failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Branch might already exist — try without -b
+        if stderr.contains("already exists") {
+            let output2 = std::process::Command::new("git")
+                .args(["-C", &project_path, "worktree", "add", &worktree_path, &branch_name])
+                .output()
+                .map_err(|e| format!("git worktree add (existing branch) failed: {}", e))?;
+            if !output2.status.success() {
+                return Err(format!("git worktree add failed: {}", String::from_utf8_lossy(&output2.stderr)));
+            }
+        } else {
+            return Err(format!("git worktree add failed: {}", stderr));
+        }
+    }
+
+    // Add .clauge-worktrees to .gitignore if not already there
+    let gitignore = PathBuf::from(&project_path).join(".gitignore");
+    if let Ok(contents) = std::fs::read_to_string(&gitignore) {
+        if !contents.contains(".clauge-worktrees") {
+            let _ = std::fs::write(&gitignore, format!("{}\n.clauge-worktrees/\n", contents.trim_end()));
+        }
+    } else {
+        let _ = std::fs::write(&gitignore, ".clauge-worktrees/\n");
+    }
+
+    Ok(worktree_path)
+}
+
+/// Remove a git worktree
+#[tauri::command]
+fn remove_worktree(project_path: String, worktree_path: String) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", &project_path, "worktree", "remove", "--force", &worktree_path])
+        .output()
+        .map_err(|e| format!("git worktree remove failed: {}", e))?;
+
+    if !output.status.success() {
+        // If worktree dir is already gone, just prune
+        let _ = std::process::Command::new("git")
+            .args(["-C", &project_path, "worktree", "prune"])
+            .output();
+    }
+    Ok(())
+}
+
+/// Update worktree info for a profile
+#[tauri::command]
+fn update_profile_worktree(id: String, worktree_path: Option<String>, worktree_branch: Option<String>) -> Result<(), String> {
+    let mut profiles = load_profiles();
+    if let Some(profile) = profiles.iter_mut().find(|p| p.id == id) {
+        profile.worktree_path = worktree_path;
+        profile.worktree_branch = worktree_branch;
+    } else {
+        return Err("Profile not found".to_string());
+    }
+    save_profiles(&profiles)?;
+    Ok(())
+}
+
+/// Count active sessions for a project path (profiles that have been used)
+#[tauri::command]
+fn count_project_sessions(project_path: String) -> Result<u32, String> {
+    let profiles = load_profiles();
+    let count = profiles.iter()
+        .filter(|p| p.project_path == project_path)
+        .count() as u32;
+    Ok(count)
 }
 
 #[tauri::command]
@@ -694,6 +798,11 @@ pub fn run() {
             update_last_used,
             refresh_session_ids,
             update_session_id,
+            is_git_repo,
+            create_worktree,
+            remove_worktree,
+            update_profile_worktree,
+            count_project_sessions,
             discover_sessions,
             get_session_tokens,
             fetch_usage_limits,

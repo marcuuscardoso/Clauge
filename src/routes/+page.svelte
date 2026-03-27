@@ -180,6 +180,38 @@
 
       try {
         await invoke("update_last_used", { id: profile.id });
+
+        // Determine working directory — use worktree if already set, or create one if needed
+        let spawnPath = profile.worktreePath || profile.projectPath;
+
+        if (!profile.worktreePath) {
+          // Check if another session for this project already has a terminal running
+          const otherActive = profiles.some(p =>
+            p.id !== profile.id &&
+            p.projectPath === profile.projectPath &&
+            terminalMap.has(p.id) &&
+            terminalMap.get(p.id).terminalId
+          );
+
+          if (otherActive) {
+            // Need worktree isolation — check if it's a git repo first
+            try {
+              const isGit = await invoke("is_git_repo", { path: profile.projectPath });
+              if (isGit) {
+                const branchName = `clauge/${profile.purpose.toLowerCase().replace(/\s+/g, '-')}-${profile.title.toLowerCase().replace(/\s+/g, '-')}`;
+                const worktreePath = await invoke("create_worktree", { projectPath: profile.projectPath, branchName });
+                spawnPath = worktreePath;
+                await invoke("update_profile_worktree", { id: profile.id, worktreePath, worktreeBranch: branchName });
+                profile.worktreePath = worktreePath;
+                profile.worktreeBranch = branchName;
+                await loadProfiles();
+              }
+            } catch(e) {
+              console.warn("Worktree creation failed, using original path:", e);
+            }
+          }
+        }
+
         const onOutput = new Channel();
         onOutput.onmessage = (payload) => {
           if (entry.term) {
@@ -195,7 +227,7 @@
 
         const tid = await invoke("spawn_terminal", {
           sessionId: profile.claudeSessionId || null,
-          projectPath: profile.projectPath,
+          projectPath: spawnPath,
           contextPrompt: profile.contextPrompt,
           onOutput: onOutput,
         });
@@ -414,6 +446,9 @@
                     </div>
                     <div class="profile-meta">
                       <span class="badge" style="color:{purposeColors[profile.purpose] || '#8b949e'}; background:{purposeColors[profile.purpose] || '#8b949e'}22">{profile.purpose}</span>
+                      {#if profile.worktreeBranch}
+                        <span class="wt-badge" title="Isolated worktree: {profile.worktreeBranch}">WT</span>
+                      {/if}
                       <span class="time">{relativeTime(profile.lastUsedAt)}</span>
                     </div>
                   </button>
@@ -657,6 +692,7 @@
   .profile-title { font-size: 13px; font-weight: 500; color: var(--text-primary); margin-bottom: 3px; }
   .profile-meta { display: flex; align-items: center; justify-content: space-between; }
   .badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 10px; }
+  .wt-badge { font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: rgba(210, 168, 255, 0.2); color: #d2a8ff; letter-spacing: 0.5px; }
   .time { font-size: 11px; color: var(--text-secondary); }
   .bottom-bar { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 4px 16px; background: var(--sidebar-bg); border-top: 1px solid var(--border); flex-shrink: 0; }
   .limit-meter { display: flex; align-items: center; gap: 6px; }
