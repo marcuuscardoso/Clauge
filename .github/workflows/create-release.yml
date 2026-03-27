@@ -64,5 +64,8 @@ jobs:
           body: ${{ github.event.inputs.release_notes || format('## What''s Changed\n{0}', steps.changelog.outputs.changes) }}
           draft: false
           prerelease: false
-          # Images can be uploaded manually to the release after creation
-          # or via: gh release upload v0.1.0 screenshot.png --repo ansxuman/Clauge
+
+      - name: Trigger build
+        run: gh workflow run build-release.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
