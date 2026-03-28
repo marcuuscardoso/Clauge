@@ -37,9 +37,15 @@ jobs:
       #     security list-keychain -d user -s $KEYCHAIN_PATH
 
       - name: Build macOS (arm64)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun run tauri build --target aarch64-apple-darwin
 
       - name: Build macOS (x86_64)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun run tauri build --target x86_64-apple-darwin
 
       - name: Get latest release tag
@@ -89,22 +95,27 @@ jobs:
 
       - name: Upload to release
         if: steps.release.outputs.tag != ''
-        run: |
-          TAG="${{ steps.release.outputs.tag }}"
-          gh release upload "$TAG" \
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg \
-            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg \
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz \
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz \
-            latest.json \
-            --clobber 2>/dev/null || true
-          # Upload sig files if they exist
-          gh release upload "$TAG" \
-            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig \
-            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig \
-            --clobber 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.release.outputs.tag }}"
+          echo "Uploading to release $TAG"
+
+          for f in src-tauri/target/*/release/bundle/dmg/*.dmg; do
+            [ -f "$f" ] && echo "Uploading $f" && gh release upload "$TAG" "$f" --clobber
+          done
+
+          for f in src-tauri/target/*/release/bundle/macos/*.app.tar.gz; do
+            [ -f "$f" ] && echo "Uploading $f" && gh release upload "$TAG" "$f" --clobber
+          done
+
+          for f in src-tauri/target/*/release/bundle/macos/*.app.tar.gz.sig; do
+            [ -f "$f" ] && echo "Uploading $f" && gh release upload "$TAG" "$f" --clobber
+          done
+
+          [ -f latest.json ] && echo "Uploading latest.json" && gh release upload "$TAG" latest.json --clobber
+
+          echo "Done"
 
       - name: Upload artifacts (fallback)
         if: steps.release.outputs.tag == ''
