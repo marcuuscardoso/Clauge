@@ -23,12 +23,6 @@
 
 ---
 
-<p align="center">
-  <video src="docs/promo.mp4" autoplay loop muted playsinline width="800"></video>
-</p>
-
----
-
 ## Session Purposes
 
 Each session stays focused on what you need right now. The purpose persists throughout the entire conversation.
