@@ -832,10 +832,13 @@
                     );
                     if (!resp.ok) return;
                     const release = await resp.json();
-                    const isArm =
-                        navigator.userAgent.includes("ARM") ||
-                        (navigator.platform === "MacIntel" &&
-                            navigator.maxTouchPoints > 0);
+                    // Default to Apple Silicon — most Macs since 2020 are ARM
+                    // Use userAgentData for Chrome/Edge, fallback to aarch64
+                    let isArm = true;
+                    try {
+                        const ua = await navigator.userAgentData?.getHighEntropyValues(["architecture"]);
+                        if (ua?.architecture && ua.architecture !== "arm") isArm = false;
+                    } catch(_) {}
                     const dmg =
                         (release.assets || []).find(
                             (a) =>
