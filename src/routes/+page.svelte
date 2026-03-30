@@ -606,7 +606,7 @@ Anti-patterns to avoid:
     usageError = '';
     try {
       const key = await invoke("load_session_key");
-      if (!key) return;
+      if (!key) { sessionKeyConfigured = false; return; }
 
       const usage = await invoke("fetch_usage_limits", { sessionKey: key });
 
@@ -667,7 +667,7 @@ Anti-patterns to avoid:
   });
 </script>
 
-<svelte:window onkeydown={handleGlobalKeydown} onresize={handleWindowResize} onclick={() => { menuProfile = null; }} />
+<svelte:window onkeydown={handleGlobalKeydown} onresize={handleWindowResize} onclick={() => { menuProfile = null; }} oncontextmenu={(e) => { if (!import.meta.env.DEV) e.preventDefault(); }} />
 
 <div class="app-wrapper">
 <div class="app">
@@ -1150,9 +1150,6 @@ Anti-patterns to avoid:
   .key-dot.connected { background: #3fb950; box-shadow: 0 0 6px rgba(63, 185, 80, 0.5); }
   .save-key-btn { padding: 5px 14px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 11px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
   .save-key-btn:hover { background: var(--accent); color: #fff; }
-  .refresh-btn { padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--accent); font-size: 10px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
-  .refresh-btn:hover:not(:disabled) { background: var(--hover-bg, rgba(255,255,255,0.06)); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: wait; }
 
   .settings-tabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
   .stab { flex: 1; padding: 8px; border: none; background: transparent; color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; border-bottom: 2px solid transparent; transition: all 0.15s; }
@@ -1165,12 +1162,6 @@ Anti-patterns to avoid:
   .slink.coffee { color: #d29922; }
   .slink.coffee:hover { color: #e3b341; }
 
-  .usage-detail { margin-bottom: 12px; }
-  .usage-detail h3 { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.3px; margin: 0 0 6px; }
-  .ud-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 12px; color: var(--text-secondary); }
-  .ud-row span:last-child { color: var(--text-primary); font-weight: 500; font-variant-numeric: tabular-nums; }
-  .ud-row.total { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
-  .ud-row.total span:last-child { color: var(--accent); font-weight: 700; }
 
   .terminal-area { flex: 1; min-width: 0; height: 100vh; background: var(--term-bg); position: relative; overflow: hidden; -webkit-app-region: no-drag; }
   .terminal-panel { width: 100%; height: 100%; padding: 4px; -webkit-app-region: no-drag; }
