@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tauri::ipc::Channel;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconId};
@@ -335,9 +336,44 @@ fn is_git_repo(path: String) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
+/// Sanitize a branch name to comply with git naming rules.
+/// Removes dangerous characters, prevents flag injection (leading `-`),
+/// and enforces git's naming constraints.
+fn sanitize_branch_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '/' || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+
+    // Collapse consecutive dots/dashes, remove trailing dots/locks
+    let sanitized = sanitized
+        .replace("..", ".")
+        .replace(".lock", "")
+        .trim_matches(|c: char| c == '.' || c == '/' || c == '-')
+        .to_string();
+
+    if sanitized.is_empty() {
+        return "clauge/unnamed".to_string();
+    }
+
+    // Prevent flag injection: if any path segment starts with `-`, prefix it
+    sanitized
+        .split('/')
+        .map(|seg| {
+            if seg.starts_with('-') {
+                format!("x{}", seg)
+            } else {
+                seg.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Create a git worktree for session isolation
 #[tauri::command]
 fn create_worktree(project_path: String, branch_name: String) -> Result<String, String> {
+    let branch_name = sanitize_branch_name(&branch_name);
     let worktree_dir = PathBuf::from(&project_path)
         .join(".clauge-worktrees")
         .join(&branch_name);
@@ -657,6 +693,24 @@ fn update_tray_title(app_handle: tauri::AppHandle, title: String) -> Result<(), 
 }
 
 
+/// Resolve the full path to the `claude` binary by asking the user's login shell.
+/// Falls back to just "claude" if resolution fails.
+fn resolve_claude_path() -> String {
+    let user_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    if let Ok(output) = std::process::Command::new(&user_shell)
+        .args(["-l", "-i", "-c", "which claude"])
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    "claude".to_string()
+}
+
 /// Spawn a terminal using Tauri's Channel API for streaming PTY output to the frontend.
 /// The `on_output` channel sends TerminalOutputPayload messages directly to JS callback.
 #[tauri::command]
@@ -680,30 +734,26 @@ fn spawn_terminal(
         })
         .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
-    let mut claude_cmd = String::from("claude");
+    let claude_path = resolve_claude_path();
+    eprintln!("[Clauge] Resolved claude binary: {}", claude_path);
+    eprintln!("[Clauge] CWD: {}", project_path);
+
+    let mut cmd = CommandBuilder::new(&claude_path);
+
     if let Some(ref sid) = session_id {
-        claude_cmd.push_str(&format!(" --resume \"{}\"", sid));
+        cmd.arg("--resume");
+        cmd.arg(sid);
     }
     if skip_permissions.unwrap_or(false) {
-        claude_cmd.push_str(" --dangerously-skip-permissions");
+        cmd.arg("--dangerously-skip-permissions");
     }
-    // Inject purpose prompt via --append-system-prompt (persists every turn)
     if let Some(ref prompt) = context_prompt {
         if !prompt.is_empty() {
-            let escaped = prompt.replace('\\', "\\\\").replace('"', "\\\"");
-            claude_cmd.push_str(&format!(" --append-system-prompt \"{}\"", escaped));
+            cmd.arg("--append-system-prompt");
+            cmd.arg(prompt);
         }
     }
 
-    eprintln!("[Clauge] Spawning command (truncated): {}", &claude_cmd[..claude_cmd.len().min(120)]);
-    eprintln!("[Clauge] CWD: {}", project_path);
-
-    let user_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut cmd = CommandBuilder::new(&user_shell);
-    cmd.arg("-l");
-    cmd.arg("-i");
-    cmd.arg("-c");
-    cmd.arg(&claude_cmd);
     cmd.cwd(&project_path);
 
     if let Some(home) = dirs::home_dir() {
@@ -775,7 +825,6 @@ fn spawn_terminal(
     state
         .terminals
         .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
         .insert(terminal_id.clone(), entry);
 
     Ok(terminal_id)
@@ -828,7 +877,7 @@ fn spawn_shell(
         }
     });
 
-    state.terminals.lock().map_err(|e| format!("Lock error: {}", e))?
+    state.terminals.lock()
         .insert(terminal_id.clone(), TerminalEntry { master: pty_pair.master, writer, child });
 
     Ok(terminal_id)
@@ -842,8 +891,7 @@ fn write_to_terminal(
 ) -> Result<(), String> {
     let mut terminals = state
         .terminals
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .lock();
 
     let entry = terminals
         .get_mut(&terminal_id)
@@ -871,8 +919,7 @@ fn resize_terminal(
 ) -> Result<(), String> {
     let terminals = state
         .terminals
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
+        .lock();
 
     let entry = terminals.get(&terminal_id).ok_or("Terminal not found")?;
 
@@ -886,6 +933,19 @@ fn resize_terminal(
         })
         .map_err(|e| format!("Resize error: {}", e))?;
 
+    Ok(())
+}
+
+#[tauri::command]
+fn kill_terminal(
+    state: State<'_, TerminalState>,
+    terminal_id: String,
+) -> Result<(), String> {
+    let mut terminals = state.terminals.lock();
+    if let Some(mut entry) = terminals.remove(&terminal_id) {
+        let _ = entry.child.kill();
+        eprintln!("[Clauge] Killed terminal {}", terminal_id);
+    }
     Ok(())
 }
 
@@ -928,7 +988,8 @@ pub fn run() {
             spawn_terminal,
             spawn_shell,
             write_to_terminal,
-            resize_terminal
+            resize_terminal,
+            kill_terminal
         ])
         .setup(|app| {
             let setup_start = std::time::Instant::now();
@@ -1025,11 +1086,23 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::Reopen { .. } = event {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+            match event {
+                tauri::RunEvent::Reopen { .. } => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
                 }
+                tauri::RunEvent::ExitRequested { .. } => {
+                    if let Some(state) = app.try_state::<TerminalState>() {
+                        let mut terminals = state.terminals.lock();
+                        for (id, mut entry) in terminals.drain() {
+                            let _ = entry.child.kill();
+                            eprintln!("[Clauge] Cleaned up terminal {} on exit", id);
+                        }
+                    }
+                }
+                _ => {}
             }
         });
 }

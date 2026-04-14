@@ -375,7 +375,8 @@
           try {
             const isGit = await invoke("is_git_repo", { path: profile.projectPath });
             if (isGit) {
-              const branchName = `clauge/${profile.purpose.toLowerCase().replace(/\s+/g, '-')}-${profile.title.toLowerCase().replace(/\s+/g, '-')}`;
+              const rawBranch = `clauge/${profile.purpose.toLowerCase().replace(/\s+/g, '-')}-${profile.title.toLowerCase().replace(/\s+/g, '-')}`;
+              const branchName = rawBranch.replace(/[^a-zA-Z0-9/_\-.]/g, '').replace(/\.{2,}/g, '.').replace(/\.lock/g, '');
               const worktreePath = await invoke("create_worktree", { projectPath: profile.projectPath, branchName });
               spawnPath = worktreePath;
               await invoke("update_profile_worktree", { id: profile.id, worktreePath, worktreeBranch: branchName });
@@ -527,17 +528,23 @@
 
     await invoke("delete_profile", { id: deletedId });
 
-    // Clean up terminal
+    // Clean up terminal (backend PTY + child process)
     const entry = terminalMap.get(deletedId);
     if (entry) {
+      if (entry.terminalId) {
+        try { await invoke("kill_terminal", { terminalId: entry.terminalId }); } catch(e) {}
+      }
       entry.container.style.display = "none";
       if (entry.term) entry.term.dispose();
       terminalMap.delete(deletedId);
     }
 
-    // Clean up shell
+    // Clean up shell (backend PTY + child process)
     const sEntry = shellMap.get(deletedId);
     if (sEntry) {
+      if (sEntry.terminalId) {
+        try { await invoke("kill_terminal", { terminalId: sEntry.terminalId }); } catch(e) {}
+      }
       sEntry.container.style.display = "none";
       if (sEntry.term) sEntry.term.dispose();
       shellMap.delete(deletedId);
