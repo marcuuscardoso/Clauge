@@ -10,6 +10,11 @@
   let showModal = $state(false);
   let showSettings = $state(false);
   let settingsTab = $state('settings');
+  let claudePlugins = $state([]);
+  let marketplacePlugins = $state([]);
+  let pluginSearch = $state('');
+  let installingPlugin = $state('');
+  let pluginTab = $state('installed');
   let currentTerminalId = null;
   let terminalEl;
   let statusMsg = $state("Ready");
@@ -20,6 +25,7 @@
   let appVersion = $state('');
   let claudePlan = $state('');
   let updateReady = $state(null); // { version, body } — only set after download complete
+  let updateDismissed = $state(false);
   let showUpdateModal = $state(false);
   let showWhatsNew = $state(false);
   let whatsNewBody = $state('');
@@ -65,7 +71,9 @@
   // Delete confirmation
   let deleteConfirm = $state(null); // profile to confirm delete
   let menuProfile = $state(null); // profile whose ellipsis menu is open
+  let profileMenuOpen = $state(false);
   let sessionActivity = $state({}); // profileId → 'active' | 'done' | null
+  let gitChanges = $state({}); // profileId → count of changes
 
   // Theme state
   let currentTheme = $state(typeof localStorage !== 'undefined' ? (localStorage.getItem('clauge-theme') || 'dark') : 'dark');
@@ -81,7 +89,11 @@
   let wrapperEl;
   const shellMap = new Map(); // profileId → { term, fitAddon, container, terminalId }
   let activeShellEntry = null;
-  let shellWidthPercent = $state(50);
+  let shellWidthMap = {};  // profileId → width percent
+  let isDraggingDivider = $state(false);
+  let focusedPanel = $state('claude'); // 'claude' | 'shell'
+
+  function getShellWidth(profileId) { return shellWidthMap[profileId] ?? 50; }
 
   // Modal state
   let modalPath = $state("");
@@ -284,13 +296,17 @@
 
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
+    isDraggingDivider = true;
 
     let rafId = null;
     function onMove(ev) {
       const rect = wrapper.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const pct = (x / rect.width) * 100;
-      shellWidthPercent = Math.max(20, Math.min(80, 100 - pct));
+      if (activeProfile) {
+        shellWidthMap[activeProfile.id] = Math.max(20, Math.min(80, 100 - pct));
+        shellWidthMap = {...shellWidthMap};
+      }
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => handleWindowResize());
     }
@@ -300,6 +316,7 @@
       document.removeEventListener('mouseup', onUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      isDraggingDivider = false;
       requestAnimationFrame(() => {
         try { activeTermEntry?.fitAddon?.fit(); } catch(_) {}
         try { activeShellEntry?.fitAddon?.fit(); } catch(_) {}
@@ -361,9 +378,21 @@
       showTermEntry(entry);
       if (shellOpen) spawnShellForProfile(profile);
       statusMsg = profile.title;
+      // Refresh git status badge
+      const gitPath = profile.worktreePath || profile.projectPath;
+      invoke("get_git_status", { projectPath: gitPath }).then(changes => {
+        gitChanges[profile.id] = changes.length;
+        gitChanges = {...gitChanges};
+      }).catch(() => {});
     } else {
       statusMsg = "Spawning...";
-      if (!entry) entry = createTermEntry(profile.id);
+      if (!entry) {
+        entry = createTermEntry(profile.id);
+      } else {
+        // Terminal exited (terminalId is null) — clear old content for respawn
+        entry.term.clear();
+        entry.term.write('\r\n\x1b[2mResuming session...\x1b[0m\r\n\r\n');
+      }
 
       try {
         await invoke("update_last_used", { id: profile.id });
@@ -418,6 +447,24 @@
           }
           // Detect action-required prompts and notify if window not focused
           checkForActionPrompt(payload.data, profile.title);
+          // Detect Claude session exit (Ctrl+C, exit, /exit)
+          try {
+            const text = atob(payload.data);
+            if (/Resume this session with:/.test(text)) {
+              entry.terminalId = null;
+              const resumeMatch = text.match(/claude --resume ([a-f0-9-]+)/);
+              if (resumeMatch && !profile.claudeSessionId) {
+                const extractedSessionId = resumeMatch[1];
+                invoke("update_session_id", { id: profile.id, claudeSessionId: extractedSessionId }).then(() => {
+                  profile.claudeSessionId = extractedSessionId;
+                  loadProfiles();
+                  console.log("[Clauge] Session ID captured on exit:", extractedSessionId);
+                }).catch(() => {});
+              }
+              sessionActivity[profileId] = 'done';
+              sessionActivity = { ...sessionActivity };
+            }
+          } catch(_) {}
           // Track activity for background sessions
           if (activeProfile?.id !== profileId) {
             sessionActivity[profileId] = 'active';
@@ -459,6 +506,8 @@
           projectPath: spawnPath,
           contextPrompt: purposePrompt || null,
           skipPermissions: profile.skipPermissions || false,
+          gitName: profile.gitName || null,
+          gitEmail: profile.gitEmail || null,
           onOutput: onOutput,
         });
         entry.terminalId = tid;
@@ -466,6 +515,12 @@
         statusMsg = profile.title;
         showTermEntry(entry);
         if (shellOpen) spawnShellForProfile(profile);
+
+        // Fetch git status for badge
+        invoke("get_git_status", { projectPath: spawnPath }).then(changes => {
+          gitChanges[profile.id] = changes.length;
+          gitChanges = {...gitChanges};
+        }).catch(() => {});
 
         entry.fitAddon.fit();
         const dims = entry.fitAddon.proposeDimensions();
@@ -863,8 +918,36 @@ Anti-patterns to avoid:
         import("@tauri-apps/api/window").then(({ getCurrentWindow, UserAttentionType }) => {
           getCurrentWindow().requestUserAttention(UserAttentionType.Critical);
         }).catch(() => {});
+        playNotificationSound();
       }
     }
+  }
+
+  function playNotificationSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = 880; // A5 note
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0.08, ctx.currentTime); // Very quiet
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.3);
+      // Play a second tone for a pleasant chime
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.frequency.value = 1320; // E6 note
+      osc2.type = 'sine';
+      gain2.gain.setValueAtTime(0.05, ctx.currentTime + 0.1);
+      gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+      osc2.start(ctx.currentTime + 0.1);
+      osc2.stop(ctx.currentTime + 0.4);
+    } catch(_) {}
   }
 
   async function sendActionNotification(sessionTitle) {
@@ -879,6 +962,30 @@ Anti-patterns to avoid:
         sendNotification({ title: `Action Required`, body: `${sessionTitle} — Claude is waiting for your input` });
       }
     } catch(_) {}
+  }
+
+  async function loadClaudePlugins() {
+    try { claudePlugins = await invoke("get_claude_plugins"); } catch(_) { claudePlugins = []; }
+    try { marketplacePlugins = await invoke("get_marketplace_plugins"); } catch(_) { marketplacePlugins = []; }
+  }
+  async function togglePlugin(plugin) {
+    const key = `${plugin.name}@${plugin.marketplace}`;
+    try { await invoke("toggle_claude_plugin", { pluginKey: key, enabled: !plugin.enabled }); await loadClaudePlugins(); } catch(_) {}
+  }
+  async function installPlugin(plugin) {
+    installingPlugin = plugin.name;
+    try {
+      await invoke("install_plugin", { name: plugin.name, marketplace: plugin.marketplace });
+      await invoke("toggle_claude_plugin", { pluginKey: `${plugin.name}@${plugin.marketplace}`, enabled: true });
+      await loadClaudePlugins();
+    } catch(e) { console.error('Install failed:', e); }
+    installingPlugin = '';
+  }
+  async function uninstallPlugin(plugin) {
+    try {
+      await invoke("uninstall_plugin", { name: plugin.name, marketplace: plugin.marketplace });
+      await loadClaudePlugins();
+    } catch(e) { console.error('Uninstall failed:', e); }
   }
 
   async function loadUsageLimits() {
@@ -946,7 +1053,7 @@ Anti-patterns to avoid:
   });
 </script>
 
-<svelte:window onkeydown={handleGlobalKeydown} onresize={handleWindowResize} onclick={() => { menuProfile = null; }} oncontextmenu={(e) => { if (!import.meta.env.DEV) e.preventDefault(); }} />
+<svelte:window onkeydown={handleGlobalKeydown} onresize={handleWindowResize} onclick={() => { menuProfile = null; profileMenuOpen = false; }} oncontextmenu={(e) => { if (!import.meta.env.DEV) e.preventDefault(); }} />
 
 <div class="app-wrapper">
 <div class="app">
@@ -956,11 +1063,6 @@ Anti-patterns to avoid:
     <div class="sidebar-header">
       <span class="app-title">Clauge {#if claudePlan}<span class="plan-badge">{claudePlan}</span>{/if}</span>
       <div class="header-actions">
-        <button class="settings-btn" onclick={() => showSettings = true} title="Settings">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-            <path fill-rule="evenodd" d="M7.429 1.525a6.593 6.593 0 011.142 0c.036.003.108.036.137.146l.289 1.105c.147.56.55.967.997 1.189.174.086.341.183.501.29.417.278.97.423 1.53.27l1.102-.303c.11-.03.175.016.195.046.219.31.41.641.573.989.014.031.022.11-.059.19l-.815.806c-.411.406-.562.957-.53 1.456a4.588 4.588 0 010 .582c-.032.499.119 1.05.53 1.456l.815.806c.08.08.073.159.059.19a6.494 6.494 0 01-.573.99c-.02.029-.086.074-.195.045l-1.103-.303c-.559-.153-1.112-.008-1.529.27-.16.107-.327.204-.5.29-.449.222-.851.628-.998 1.189l-.289 1.105c-.029.11-.101.143-.137.146a6.613 6.613 0 01-1.142 0c-.036-.003-.108-.037-.137-.146l-.289-1.105c-.147-.56-.55-.967-.997-1.189a4.502 4.502 0 01-.501-.29c-.417-.278-.97-.423-1.53-.27l-1.102.303c-.11.03-.175-.016-.195-.046a6.492 6.492 0 01-.573-.989c-.014-.031-.022-.11.059-.19l.815-.806c.411-.406.562-.957.53-1.456a4.587 4.587 0 010-.582c.032-.499-.119-1.05-.53-1.456l-.815-.806c-.08-.08-.073-.159-.059-.19a6.44 6.44 0 01.573-.99c.02-.029.086-.074.195-.045l1.103.303c.559.153 1.112.008 1.529-.27.16-.107.327-.204.5-.29.449-.222.851-.628.998-1.189l.289-1.105c.029-.11.101-.143.137-.146zM8 0c-.236 0-.47.01-.701.03-.743.065-1.29.615-1.458 1.261l-.29 1.106c-.017.066-.078.158-.211.224a5.994 5.994 0 00-.668.386c-.123.082-.233.117-.3.117h-.013l-1.104-.303c-.659-.18-1.364.019-1.783.667a7.998 7.998 0 00-.747 1.305c-.31.649-.107 1.39.303 1.895l.815.806c.05.048.098.147.088.294a6.084 6.084 0 000 .772c.01.147-.038.246-.088.294l-.815.806c-.41.505-.613 1.246-.303 1.895.216.452.46.882.747 1.305.42.648 1.124.848 1.783.667l1.104-.303c.06-.017.145-.003.3.117.196.131.42.271.668.386.133.066.194.158.212.224l.289 1.106c.169.646.715 1.196 1.458 1.26a8.094 8.094 0 001.402 0c.743-.064 1.29-.614 1.458-1.26l.29-1.106c.017-.066.078-.158.211-.224a5.98 5.98 0 00.668-.386c.123-.082.233-.117.3-.117h.013l1.104.303c.659.18 1.364-.019 1.783-.667.287-.423.531-.853.747-1.305.31-.649.107-1.39-.303-1.895l-.815-.806c-.05-.048-.098-.147-.088-.294a6.1 6.1 0 000-.772c-.01-.147.039-.246.088-.294l.815-.806c.41-.505.613-1.246.303-1.895a7.998 7.998 0 00-.747-1.305c-.42-.648-1.124-.848-1.783-.667l-1.104.303c-.06.017-.145.003-.3-.117a5.994 5.994 0 00-.668-.386c-.133-.066-.194-.158-.212-.224L10.16 1.29C9.99.645 9.444.095 8.701.031A8.094 8.094 0 008 0zm0 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5zM6.5 8a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0z"/>
-          </svg>
-        </button>
         <button class="new-btn" onclick={() => showModal = true} title="New Session (Cmd+N)">+</button>
       </div>
     </div>
@@ -992,6 +1094,9 @@ Anti-patterns to avoid:
                       <span class="badge" style="color:{purposeColors[profile.purpose] || '#8b949e'}; background:{purposeColors[profile.purpose] || '#8b949e'}22">{profile.purpose}</span>
                       {#if profile.worktreeBranch}
                         <span class="wt-badge" title="Isolated worktree: {profile.worktreeBranch}">WT</span>
+                      {/if}
+                      {#if gitChanges[profile.id] > 0}
+                        <span class="git-badge">{gitChanges[profile.id]} changes</span>
                       {/if}
                       <span class="time">{relativeTime(profile.lastUsedAt)}</span>
                     </div>
@@ -1028,7 +1133,8 @@ Anti-patterns to avoid:
   </button>
 
   <div class="terminal-wrapper" bind:this={wrapperEl}>
-    <div class="terminal-area">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="terminal-area" class:panel-focused={focusedPanel === 'claude'} onclick={() => focusedPanel = 'claude'}>
       {#if !activeProfile}
         <div class="empty-state">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.5">
@@ -1046,19 +1152,49 @@ Anti-patterns to avoid:
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="shell-divider" style="display:{shellOpen ? 'block' : 'none'}" onmousedown={startDividerDrag}></div>
-    <div class="shell-area" style="display:{shellOpen ? 'flex' : 'none'};width:{shellWidthPercent}%;flex:none;">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="shell-area" class:no-transition={isDraggingDivider} class:panel-focused={focusedPanel === 'shell'} onclick={() => focusedPanel = 'shell'} style="display:{shellOpen ? 'flex' : 'none'};width:{getShellWidth(activeProfile?.id)}%;flex:none;">
       <div class="shell-panel" bind:this={shellEl}></div>
     </div>
   </div>
 </div>
 <div class="bottom-bar">
   <div class="bottom-left">
-    {#if updateReady}
-      <button class="update-hint" onclick={() => showWhatsNew = true} title="Update available — v{updateReady.version}">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="var(--accent)"><path d="M4.22 9.72a.75.75 0 010-1.06l3.25-3.25a.75.75 0 011.06 0l3.25 3.25a.75.75 0 01-1.06 1.06L8.75 7.69V13.5a.75.75 0 01-1.5 0V7.69L5.28 9.72a.75.75 0 01-1.06 0zM2.75 3.5a.75.75 0 010-1.5h10.5a.75.75 0 010 1.5H2.75z"/></svg>
-        <span class="update-dot"></span>
-      </button>
-    {/if}
+    <div class="profile-wrap">
+      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+      <div onclick={(e) => { e.stopPropagation(); profileMenuOpen = !profileMenuOpen; }}>
+        <button class="profile-avatar" title="Profile"><span class="avatar-letter">CG</span></button>
+      </div>
+      {#if profileMenuOpen}
+        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+        <div class="profile-menu" onclick={(e) => e.stopPropagation()}>
+          <button class="pm-item" onclick={() => { profileMenuOpen = false; showSettings = true; settingsTab = 'settings'; }}>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z"/></svg>
+            Settings
+          </button>
+          <button class="pm-item" onclick={() => { profileMenuOpen = false; showSettings = true; settingsTab = 'plugins'; loadClaudePlugins(); }}>
+            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            Plugins
+          </button>
+          <div class="pm-sep"></div>
+          <button class="pm-item" onclick={() => { profileMenuOpen = false; openExternal('https://clauge.ssh-i.in/changelog.html'); }}>
+            <svg viewBox="0 0 24 24"><path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26z"/></svg>
+            What's New
+            <svg class="pm-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </button>
+          <button class="pm-item" onclick={() => { profileMenuOpen = false; openExternal('https://github.com/ansxuman/Clauge/issues'); }}>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            Report Issue
+            <svg class="pm-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </button>
+          <button class="pm-item pm-coffee" onclick={() => { profileMenuOpen = false; openExternal('https://buymeacoffee.com/ansxuman'); }}>
+            <svg viewBox="0 0 24 24"><path d="M17 8h1a4 4 0 110 8h-1"/><path d="M3 8h14v9a4 4 0 01-4 4H7a4 4 0 01-4-4V8z"/><line x1="6" y1="2" x2="6" y2="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="14" y1="2" x2="14" y2="4"/></svg>
+            Buy Me a Coffee
+            <svg class="pm-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </button>
+        </div>
+      {/if}
+    </div>
   </div>
   <div class="bottom-center">
     {#if usageLimits}
@@ -1092,6 +1228,26 @@ Anti-patterns to avoid:
     {#if appVersion}<span class="bottom-version">v{appVersion}</span>{/if}
   </div>
 </div>
+
+{#if updateReady && !updateDismissed}
+  <div class="update-notif">
+    <div class="un-header">
+      <svg class="un-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+      <div class="un-text">
+        <span class="un-title">Clauge v{updateReady.version} is available</span>
+        <span class="un-desc">A new version has been downloaded. Restart to apply.</span>
+      </div>
+      <button class="un-close" onclick={() => updateDismissed = true}>&times;</button>
+    </div>
+    <div class="un-actions">
+      <button class="un-btn primary" onclick={() => { restartToUpdate(); }}>Restart to Update</button>
+      <button class="un-btn secondary" onclick={() => openExternal('https://clauge.ssh-i.in/changelog.html')}>
+        What's New
+        <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      </button>
+    </div>
+  </div>
+{/if}
 </div>
 
 {#if showModal}
@@ -1157,49 +1313,55 @@ Anti-patterns to avoid:
 
 {#if showSettings}
 <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-<div class="modal-backdrop">
-  <div class="modal settings-modal">
-    <div class="settings-tabs">
-      <button class="stab" class:active={settingsTab === 'settings'} onclick={() => settingsTab = 'settings'}>Settings</button>
-      <button class="stab" class:active={settingsTab === 'usage'} onclick={() => settingsTab = 'usage'}>Usage</button>
+<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) showSettings = false; }}>
+  <div class="stg-modal">
+    <div class="stg-header">
+      <span class="stg-title">Settings</span>
+      <button class="stg-close" onclick={() => showSettings = false}>&times;</button>
     </div>
-
-    {#if settingsTab === 'settings'}
-      <label>Theme
-        <div class="chips" style="margin-top:6px;">
-          <button class="chip" class:selected={currentTheme === 'dark'} onclick={() => applyTheme('dark')}>Dark</button>
-          <button class="chip" class:selected={currentTheme === 'light'} onclick={() => applyTheme('light')}>Light</button>
-        </div>
-      </label>
-
-      <label>Accent Color
-        <div class="accent-row">
-          {#each ['#58a6ff', '#d2a8ff', '#3fb950', '#f85149', '#d29922', '#ff7b72'] as color}
-            <button class="color-dot" style="background:{color};{accentColor === color ? 'box-shadow:0 0 0 2px var(--text-primary);' : ''}"
-              onclick={() => applyAccent(color)} title={color}></button>
-          {/each}
-        </div>
-      </label>
-
-      <div class="settings-links">
-        <button class="slink" onclick={() => openExternal('https://github.com/AnsXuman/Clauge/issues')}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 9.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3z"/><path d="M8 0a8 8 0 100 16A8 8 0 008 0zM1.5 8a6.5 6.5 0 1113 0 6.5 6.5 0 01-13 0z"/></svg>
-          Report Issue
+    <div class="stg-layout">
+      <div class="stg-tabs">
+        <button class="stg-tab" class:active={settingsTab === 'settings'} onclick={() => settingsTab = 'settings'}>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v1m0 16v1m-9-9h1m16 0h1m-2.636-6.364l-.707.707M6.343 17.657l-.707.707m0-12.728l.707.707m11.314 11.314l.707.707" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          Appearance
         </button>
-        <button class="slink" onclick={() => openExternal('https://github.com/AnsXuman/Clauge')}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4.72 3.22a.75.75 0 011.06 1.06L2.06 8l3.72 3.72a.75.75 0 11-1.06 1.06L.47 8.53a.75.75 0 010-1.06l4.25-4.25zm6.56 0a.75.75 0 10-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 101.06 1.06l4.25-4.25a.75.75 0 000-1.06L11.28 3.22z"/></svg>
-          Source Code
+        <button class="stg-tab" class:active={settingsTab === 'usage'} onclick={() => settingsTab = 'usage'}>
+          <svg viewBox="0 0 24 24"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+          Usage
         </button>
-        <button class="slink" onclick={() => openExternal('https://github.com/AnsXuman')}>
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10.561 8.073a6.005 6.005 0 013.432 5.142.75.75 0 11-1.498.07 4.5 4.5 0 00-8.99 0 .75.75 0 01-1.498-.07 6.004 6.004 0 013.431-5.142 3.999 3.999 0 115.123 0zM10.5 5a2.5 2.5 0 10-5 0 2.5 2.5 0 005 0z"/></svg>
-          Developer
+        <button class="stg-tab" class:active={settingsTab === 'plugins'} onclick={() => { settingsTab = 'plugins'; loadClaudePlugins(); }}>
+          <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          Plugins
         </button>
-        <button class="slink coffee" onclick={() => openExternal('https://buymeacoffee.com/ansxuman')}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21.5c0 .28.22.5.5.5h15c.28 0 .5-.22.5-.5V18H2v3.5zM20 6h-1V4.5c0-.28-.22-.5-.5-.5h-15c-.28 0-.5.22-.5.5V6H2c-1.1 0-2 .9-2 2v2c0 1.1.9 2 2 2h1.47c.41 1.74 1.7 3.15 3.37 3.72l-.34.78c-.12.28.04.5.34.5h6.32c.3 0 .46-.22.34-.5l-.34-.78c1.67-.57 2.96-1.98 3.37-3.72H18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-2 4h-1V8h1v2z"/></svg>
-          Buy me a coffee
+        <button class="stg-tab" class:active={settingsTab === 'about'} onclick={() => settingsTab = 'about'}>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          About
         </button>
       </div>
-    {:else}
+      <div class="stg-content">
+
+    {#if settingsTab === 'settings'}
+      <div class="stg-section">
+        <div class="stg-section-label">Appearance</div>
+        <div class="stg-field">
+          <span class="stg-label">Theme</span>
+          <div class="chips">
+            <button class="chip" class:selected={currentTheme === 'dark'} onclick={() => applyTheme('dark')}>Dark</button>
+            <button class="chip" class:selected={currentTheme === 'light'} onclick={() => applyTheme('light')}>Light</button>
+          </div>
+        </div>
+        <div class="stg-field">
+          <span class="stg-label">Accent Color</span>
+          <div class="accent-row">
+            {#each ['#58a6ff', '#d2a8ff', '#3fb950', '#f85149', '#d29922', '#ff7b72'] as color}
+              <button class="color-dot" style="background:{color};{accentColor === color ? 'box-shadow:0 0 0 2px var(--text-primary);' : ''}"
+                onclick={() => applyAccent(color)} title={color}></button>
+            {/each}
+          </div>
+        </div>
+      </div>
+
+    {:else if settingsTab === 'usage'}
       {#if sessionKeyConfigured}
         <div class="key-status">
           <div class="key-status-row">
@@ -1298,52 +1460,153 @@ Anti-patterns to avoid:
         </div>
       {/if}
 
-    {/if}
+    {:else if settingsTab === 'plugins'}
+      <div class="plugin-subtabs">
+        <button class="plugin-subtab" class:active={pluginTab === 'installed'} onclick={() => pluginTab = 'installed'}>Installed ({claudePlugins.length})</button>
+        <button class="plugin-subtab" class:active={pluginTab === 'marketplace'} onclick={() => pluginTab = 'marketplace'}>Marketplace</button>
+      </div>
 
-    <div class="modal-actions">
-      <button onclick={() => showSettings = false}>Close</button>
+      {#if pluginTab === 'installed'}
+        {#if claudePlugins.length === 0}
+          <div class="plugin-empty">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            <p>No plugins installed</p>
+            <button class="plugin-browse-btn" onclick={() => pluginTab = 'marketplace'}>Browse Marketplace</button>
+          </div>
+        {:else}
+          <div class="plugins-list">
+            {#each claudePlugins as plugin}
+              <div class="plugin-card">
+                <div class="plugin-icon">{plugin.name.charAt(0).toUpperCase()}</div>
+                <div class="plugin-info">
+                  <span class="plugin-name">{plugin.name}</span>
+                  <span class="plugin-cmd">{plugin.marketplace}{plugin.version && plugin.version !== 'unknown' ? ` · v${plugin.version}` : ''}</span>
+                </div>
+                <div class="plugin-actions">
+                  <button class="toggle-switch plugin-toggle" class:on={plugin.enabled} onclick={() => togglePlugin(plugin)}>
+                    <span class="toggle-knob"></span>
+                  </button>
+                  <button class="plugin-uninstall" onclick={() => uninstallPlugin(plugin)} title="Uninstall">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zM11 3V1.75A1.75 1.75 0 009.25 0h-2.5A1.75 1.75 0 005 1.75V3H2.75a.75.75 0 000 1.5h.928l.747 10.218A1.75 1.75 0 006.172 16h3.656a1.75 1.75 0 001.747-1.282L12.322 4.5h.928a.75.75 0 000-1.5H11z"/></svg>
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {:else}
+        <div style="margin-bottom:12px;">
+          <input class="plugin-search full" type="text" bind:value={pluginSearch} placeholder="Search plugins..." />
+        </div>
+        <div class="plugins-list marketplace">
+          {#each marketplacePlugins.filter(p => !p.installed && (!pluginSearch || p.name.toLowerCase().includes(pluginSearch.toLowerCase()) || (p.description || '').toLowerCase().includes(pluginSearch.toLowerCase()))) as plugin}
+            <div class="plugin-card">
+              <div class="plugin-icon mp">{plugin.name.charAt(0).toUpperCase()}</div>
+              <div class="plugin-info">
+                <span class="plugin-name">{plugin.name}</span>
+                <span class="plugin-cmd">{plugin.description || ''}</span>
+              </div>
+              {#if plugin.installs}
+                <span class="plugin-installs">{plugin.installs >= 1000 ? `${(plugin.installs / 1000).toFixed(0)}k` : plugin.installs}</span>
+              {/if}
+              <button class="plugin-install-btn" disabled={installingPlugin === plugin.name} onclick={() => installPlugin(plugin)}>
+                {installingPlugin === plugin.name ? 'Installing...' : 'Install'}
+              </button>
+            </div>
+          {:else}
+            <div class="plugin-empty">
+              <p>No plugins found</p>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+    {:else if settingsTab === 'about'}
+      <div class="about-content">
+        <div class="about-header">
+          <span class="about-app-name">Clauge</span>
+          <span class="about-version">v{appVersion || '1.0.0'}</span>
+        </div>
+        <p class="about-desc">A developer toolkit for managing sessions, terminals, and workflows — all in one window.</p>
+
+        <div class="about-section-label">TECH STACK</div>
+        <div class="about-tech-grid">
+          <span class="about-tech-pill">
+            <svg viewBox="0 0 24 24" class="tech-icon"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z"/></svg>
+            Rust
+          </span>
+          <span class="about-tech-pill">
+            <svg viewBox="0 0 24 24" class="tech-icon"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/></svg>
+            Tauri v2
+          </span>
+          <span class="about-tech-pill">
+            <svg viewBox="0 0 24 24" class="tech-icon"><path d="M12.1 2L1 21h22L12.1 2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+            SvelteKit
+          </span>
+          <span class="about-tech-pill">
+            <svg viewBox="0 0 24 24" class="tech-icon"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            xterm.js
+          </span>
+        </div>
+
+        <div class="about-section-label">LINKS</div>
+        <div class="about-links">
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <span class="about-link-btn" onclick={() => openExternal('https://github.com/ansxuman/Clauge')}>
+            <svg viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22"/></svg>
+            <span>GitHub</span>
+          </span>
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <span class="about-link-btn" onclick={() => openExternal('https://github.com/ansxuman/Clauge/issues')}>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+            <span>Report Issue</span>
+          </span>
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <span class="about-link-btn" onclick={() => openExternal('https://github.com/ansxuman')}>
+            <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            <span>Developer</span>
+          </span>
+          <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+          <span class="about-link-btn" onclick={() => openExternal('https://clauge.ssh-i.in')}>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+            <span>Website</span>
+          </span>
+        </div>
+
+        <div class="about-section-label">SUPPORT</div>
+        <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+        <span class="about-coffee" onclick={() => openExternal('https://buymeacoffee.com/ansxuman')}>
+          <svg viewBox="0 0 24 24"><path d="M17 8h1a4 4 0 110 8h-1"/><path d="M3 8h14v9a4 4 0 01-4 4H7a4 4 0 01-4-4V8z"/><line x1="6" y1="2" x2="6" y2="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="14" y1="2" x2="14" y2="4"/></svg>
+          Buy me a coffee
+        </span>
+
+      </div>
+    {/if}
+      </div>
     </div>
   </div>
 </div>
 {/if}
 
-{#if showWhatsNew}
-<div class="modal-backdrop">
+{#if showWhatsNew && updateReady}
+<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) showWhatsNew = false; }}>
   <div class="modal whats-new-modal">
-    {#if updateReady}
-      <h2>v{updateReady.version}</h2>
-      <div class="whats-new-body">{@html (updateReady.body || '')
-        .replace(/\r\n/g, '\n')
-        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
-        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/^\s*[-*] (.+)$/gm, '<li>$1</li>')
-        .replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>')
-        .replace(/\n\n+/g, '<br>')
-        .replace(/\n/g, '<br>')
-      }</div>
-      <div class="modal-actions">
-        <button onclick={() => showWhatsNew = false}>Later</button>
-        <button class="create-btn" onclick={() => { showWhatsNew = false; restartToUpdate(); }}>Restart</button>
-      </div>
-    {:else}
-      <h2>What's New in v{appVersion}</h2>
-      <div class="whats-new-body">{@html whatsNewBody
-        .replace(/\r\n/g, '\n')
-        .replace(/^### (.+)$/gm, '<h4>$1</h4>')
-        .replace(/^## (.+)$/gm, '<h3>$1</h3>')
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/^\s*[-*] (.+)$/gm, '<li>$1</li>')
-        .replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>')
-        .replace(/\n\n+/g, '<br>')
-        .replace(/\n/g, '<br>')
-      }</div>
-      <div class="modal-actions">
-        <button onclick={() => showWhatsNew = false}>Got it</button>
-      </div>
-    {/if}
+    <h2>v{updateReady.version}</h2>
+    <div class="whats-new-body">{@html (updateReady.body || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/^### (.+)$/gm, '<h4>$1</h4>')
+      .replace(/^## (.+)$/gm, '<h3>$1</h3>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/^\s*[-*] (.+)$/gm, '<li>$1</li>')
+      .replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>')
+      .replace(/\n\n+/g, '<br>')
+      .replace(/\n/g, '<br>')
+    }</div>
+    <div class="modal-actions">
+      <button onclick={() => showWhatsNew = false}>Later</button>
+      <button class="create-btn" onclick={() => { showWhatsNew = false; restartToUpdate(); }}>Restart</button>
+    </div>
   </div>
 </div>
 {/if}
@@ -1392,8 +1655,20 @@ Anti-patterns to avoid:
   .plan-badge::after { content: ''; position: absolute; top: -50%; left: -100%; width: 60%; height: 200%; background: linear-gradient(90deg, transparent, rgba(255,215,0,0.2), transparent); animation: shine 3s ease-in-out infinite; }
   @keyframes shine { 0% { left: -100%; } 50% { left: 150%; } 100% { left: 150%; } }
   .header-actions { display: flex; gap: 6px; align-items: center; -webkit-app-region: no-drag; }
-  .settings-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
-  .settings-btn:hover { background: var(--border); color: var(--text-primary); }
+  .profile-wrap { position: relative; }
+  .profile-avatar { width: 22px; height: 22px; border-radius: 50%; border: none; background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #000)); color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: opacity 0.15s; padding: 0; overflow: hidden; }
+  .profile-avatar:hover { opacity: 0.85; }
+  .avatar-letter { font-size: 8px; font-weight: 700; text-transform: uppercase; }
+  .profile-menu { position: absolute; bottom: calc(100% + 8px); left: 0; background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 200; min-width: 180px; padding: 4px; animation: pmIn 0.12s ease; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+  @keyframes pmIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .pm-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: none; background: transparent; color: var(--text-secondary); font-size: 12px; font-family: inherit; cursor: pointer; border-radius: 5px; transition: background 0.08s; white-space: nowrap; }
+  .pm-item:hover { background: rgba(255,255,255,0.06); color: var(--text-primary); }
+  .pm-item svg { width: 14px; height: 14px; stroke: var(--text-secondary); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .pm-item:hover svg { stroke: var(--text-primary); }
+  .pm-sep { height: 1px; background: var(--border); margin: 4px 8px; }
+  .pm-coffee:hover { color: #e3b341; }
+  .pm-coffee:hover svg { stroke: #e3b341; }
+  .pm-external { width: 11px !important; height: 11px !important; margin-left: auto; opacity: 0.4; }
   .new-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-primary); font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; -webkit-app-region: no-drag; transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1); }
   .new-btn:hover { background: var(--border); transform: scale(1.1); }
   .new-btn:active { transform: scale(0.95); }
@@ -1420,6 +1695,7 @@ Anti-patterns to avoid:
   .profile-meta { display: flex; align-items: center; justify-content: space-between; }
   .badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 10px; }
   .wt-badge { font-size: 8px; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: rgba(210, 168, 255, 0.2); color: #d2a8ff; letter-spacing: 0.5px; }
+  .git-badge { font-size: 8px; font-weight: 600; padding: 1px 4px; border-radius: 3px; background: rgba(63, 185, 80, 0.2); color: #3fb950; }
 
   .profile-item { padding-right: 28px; }
   .ellipsis-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); opacity: 0; padding: 4px; border-radius: 4px; color: var(--text-secondary); cursor: pointer; transition: opacity 0.15s, background 0.15s; z-index: 2; }
@@ -1431,7 +1707,7 @@ Anti-patterns to avoid:
   .session-menu-item:hover { background: rgba(255,255,255,0.06); }
   .session-menu-item.danger:hover { background: rgba(248,81,73,0.12); color: #f85149; }
   .time { font-size: 11px; color: var(--text-secondary); }
-  .bottom-bar { display: flex; align-items: center; padding: 5px 16px; background: var(--sidebar-bg); border-top: 1px solid var(--border); flex-shrink: 0; }
+  .bottom-bar { display: flex; align-items: center; padding: 3px 16px; background: var(--sidebar-bg); border-top: 1px solid var(--border); flex-shrink: 0; }
   .bottom-left { width: 120px; flex-shrink: 0; }
   .bottom-center { flex: 1; display: flex; align-items: center; justify-content: center; gap: 12px; }
   .bottom-right { width: 120px; flex-shrink: 0; display: flex; align-items: center; justify-content: flex-end; }
@@ -1472,16 +1748,87 @@ Anti-patterns to avoid:
   .save-key-btn { padding: 5px 14px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 11px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
   .save-key-btn:hover { background: var(--accent); color: #fff; }
 
-  .settings-tabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
-  .stab { flex: 1; padding: 8px; border: none; background: transparent; color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; border-bottom: 2px solid transparent; transition: all 0.15s; }
-  .stab.active { color: var(--accent); border-bottom-color: var(--accent); }
-  .stab:hover { color: var(--text-primary); }
+  .stg-modal { width: 600px; max-height: 80vh; background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 48px rgba(0,0,0,0.5); overflow: hidden; animation: modalUp 0.18s ease; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+  @keyframes modalUp { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+  .stg-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  .stg-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+  .stg-close { width: 24px; height: 24px; border: none; background: transparent; color: var(--text-secondary); font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 4px; line-height: 1; transition: color 0.1s; }
+  .stg-close:hover { color: var(--text-primary); }
+  .stg-layout { display: flex; min-height: 400px; max-height: calc(80vh - 52px); }
+  .stg-tabs { width: 140px; flex-shrink: 0; border-right: 1px solid var(--border); padding: 6px 0; display: flex; flex-direction: column; gap: 1px; background: rgba(0,0,0,0.1); }
+  .stg-tab { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border: none; border-left: 2px solid transparent; background: transparent; color: var(--text-secondary); font-size: 12px; font-family: inherit; cursor: pointer; transition: all 0.08s; white-space: nowrap; }
+  .stg-tab:hover { background: rgba(255,255,255,0.04); color: var(--text-primary); }
+  .stg-tab.active { border-left-color: var(--accent); background: rgba(255,255,255,0.06); color: var(--text-primary); }
+  .stg-tab svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .stg-content { flex: 1; padding: 20px 24px; overflow-y: auto; min-width: 0; }
+  .stg-section { margin-bottom: 20px; }
+  .stg-section-label { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 10px; }
+  .stg-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .stg-label { font-size: 12px; color: var(--text-secondary); }
 
-  .settings-links { display: flex; flex-direction: column; gap: 2px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-  .slink { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: none; background: transparent; color: var(--text-secondary); font-size: 12px; font-family: inherit; cursor: pointer; border-radius: 5px; transition: all 0.15s; }
-  .slink:hover { background: var(--hover-bg, rgba(255,255,255,0.06)); color: var(--text-primary); }
-  .slink.coffee { color: #d29922; }
-  .slink.coffee:hover { color: #e3b341; }
+  .plugins-list { display: flex; flex-direction: column; gap: 6px; }
+  .plugin-card { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,0.02); transition: background 0.1s; }
+  .plugin-card:hover { background: rgba(255,255,255,0.04); }
+  .plugin-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+  .plugin-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+  .plugin-cmd { font-size: 10px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plugin-toggle { flex-shrink: 0; }
+  .plugin-search { padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--text-primary); font-size: 11px; font-family: inherit; width: 120px; }
+  .plugin-search::placeholder { color: var(--text-secondary); }
+  .plugin-search:focus { border-color: var(--accent); outline: none; }
+  .plugins-list.marketplace { max-height: 240px; overflow-y: auto; }
+  .plugin-icon { width: 28px; height: 28px; border-radius: 6px; background: rgba(255,255,255,0.06); color: var(--text-secondary); font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .plugin-icon.mp { background: rgba(255,255,255,0.03); color: var(--text-secondary); }
+  .plugin-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .plugin-uninstall { border: none; background: transparent; color: var(--text-secondary); cursor: pointer; padding: 3px; border-radius: 4px; display: flex; align-items: center; opacity: 0; transition: all 0.1s; }
+  .plugin-card:hover .plugin-uninstall { opacity: 1; }
+  .plugin-uninstall:hover { background: rgba(248,81,73,0.12); color: #f85149; }
+  .plugin-install-btn { padding: 4px 12px; border-radius: 5px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 11px; font-family: inherit; cursor: pointer; transition: all 0.15s; flex-shrink: 0; white-space: nowrap; }
+  .plugin-install-btn:hover:not(:disabled) { background: var(--accent); color: #fff; }
+  .plugin-install-btn:disabled { opacity: 0.5; cursor: wait; }
+  .plugin-installs { font-size: 10px; color: var(--text-secondary); opacity: 0.5; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .plugin-subtabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+  .plugin-subtab { flex: 1; padding: 8px; border: none; background: transparent; color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; border-bottom: 2px solid transparent; transition: all 0.15s; }
+  .plugin-subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .plugin-subtab:hover { color: var(--text-primary); }
+  .plugin-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 40px 0; color: var(--text-secondary); font-size: 12px; }
+  .plugin-browse-btn { padding: 6px 16px; border-radius: 6px; border: 1px solid var(--accent); background: transparent; color: var(--accent); font-size: 12px; font-family: inherit; cursor: pointer; transition: all 0.15s; margin-top: 4px; }
+  .plugin-browse-btn:hover { background: var(--accent); color: #fff; }
+  .plugin-search.full { width: 100%; }
+  .plugins-list.marketplace { max-height: none; overflow-y: auto; }
+
+  .update-notif { position: fixed; bottom: 40px; right: 16px; width: 320px; background: var(--sidebar-bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); padding: 14px; z-index: 900; animation: unSlideUp 0.25s cubic-bezier(0.4, 0, 0.2, 1); display: flex; flex-direction: column; gap: 12px; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+  @keyframes unSlideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+  .un-header { display: flex; align-items: flex-start; gap: 10px; }
+  .un-icon { width: 18px; height: 18px; stroke: var(--accent); fill: none; stroke-width: 1.6; stroke-linecap: round; flex-shrink: 0; margin-top: 1px; }
+  .un-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .un-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .un-desc { font-size: 11px; color: var(--text-secondary); }
+  .un-close { width: 20px; height: 20px; border: none; background: transparent; color: var(--text-secondary); font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 4px; flex-shrink: 0; line-height: 1; transition: color 0.1s; }
+  .un-close:hover { color: var(--text-primary); }
+  .un-actions { display: flex; gap: 8px; }
+  .un-btn { height: 30px; padding: 0 14px; border-radius: 6px; font-size: 12px; font-family: inherit; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 5px; transition: opacity 0.12s; }
+  .un-btn.primary { border: none; background: var(--accent); color: #fff; }
+  .un-btn.primary:hover { opacity: 0.85; }
+  .un-btn.secondary { border: 1px solid var(--border); background: transparent; color: var(--text-secondary); }
+  .un-btn.secondary:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+
+  .about-content { display: flex; flex-direction: column; gap: 18px; }
+  .about-header { display: flex; align-items: baseline; gap: 10px; }
+  .about-app-name { font-size: 24px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.5px; }
+  .about-version { font-size: 12px; color: var(--accent); font-family: monospace; font-weight: 600; background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 2px 8px; border-radius: 4px; }
+  .about-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin: 0; }
+  .about-section-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.6; }
+  .about-tech-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .about-tech-pill { font-size: 11px; font-family: monospace; color: var(--text-secondary); background: rgba(255,255,255,0.04); border: 1px solid var(--border); padding: 5px 12px; border-radius: 6px; display: flex; align-items: center; gap: 6px; }
+  .about-tech-pill .tech-icon { width: 14px; height: 14px; stroke: var(--text-secondary); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .about-links { display: flex; gap: 8px; flex-wrap: wrap; }
+  .about-link-btn { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text-secondary); font-size: 11px; cursor: pointer; transition: all 0.12s; }
+  .about-link-btn:hover { border-color: var(--text-secondary); color: var(--text-primary); background: rgba(255,255,255,0.03); }
+  .about-link-btn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .about-coffee { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 8px; border: 1px solid rgba(245,166,35,0.3); background: rgba(245,166,35,0.06); color: #f5a623; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.12s; }
+  .about-coffee:hover { background: rgba(245,166,35,0.12); border-color: rgba(245,166,35,0.5); }
+  .about-coffee svg { width: 18px; height: 18px; stroke: #f5a623; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 
   .terminal-wrapper { flex: 1; min-width: 0; display: flex; height: 100%; overflow: hidden; }
@@ -1490,7 +1837,8 @@ Anti-patterns to avoid:
   .shell-divider { width: 4px; background: transparent; flex-shrink: 0; cursor: col-resize; position: relative; }
   .shell-divider::after { content: ''; position: absolute; left: 1px; top: 0; bottom: 0; width: 1px; background: var(--border); }
   .shell-divider:hover::after { background: var(--accent); width: 2px; left: 1px; }
-  .shell-area { min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--term-bg); overflow: hidden; }
+  .shell-area { min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--term-bg); overflow: hidden; transition: width 0.15s ease; }
+  .shell-area.no-transition { transition: none; }
   .shell-panel { flex: 1; padding: 4px; min-width: 0; overflow: hidden; }
   .shell-panel :global(.xterm) { height: 100%; }
   .shell-panel :global(.xterm-viewport) { overflow-y: auto !important; }
