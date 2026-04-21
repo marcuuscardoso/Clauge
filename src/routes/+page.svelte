@@ -4,6 +4,7 @@
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import "@xterm/xterm/css/xterm.css";
+  import { theme } from "$lib/stores/theme.svelte";
 
   let profiles = $state([]);
   let activeProfile = $state(null);
@@ -106,10 +107,6 @@
   let gitBranches = $state([]);
   let stagedFiles = $state(new Set());
 
-  // Theme state
-  let currentTheme = $state(typeof localStorage !== 'undefined' ? (localStorage.getItem('clauge-theme') || 'dark') : 'dark');
-  let accentColor = $state(typeof localStorage !== 'undefined' ? (localStorage.getItem('clauge-accent') || '#58a6ff') : '#58a6ff');
-
   // Terminal management — one xterm per profile, switch between them
   const terminalMap = new Map();
   let activeTermEntry = null;
@@ -150,63 +147,18 @@
   const purposeColors = Object.fromEntries(purposes.map(p => [p.label, p.color]));
 
   // Theme definitions
-  const themes = {
-    dark: {
-      bg: "transparent", sidebarBg: "rgba(22, 27, 34, 0.75)", termBg: "rgba(13, 17, 23, 0.85)",
-      border: "#30363d", textPrimary: "#e6edf3", textSecondary: "#8b949e",
-      termTheme: {
-        background: "#0d1117", foreground: "#e6edf3", cursor: "#58a6ff", cursorAccent: "#0d1117",
-        selectionBackground: "rgba(88, 166, 255, 0.3)",
-        black: "#484f58", red: "#ff7b72", green: "#3fb950", yellow: "#d29922",
-        blue: "#58a6ff", magenta: "#bc8cff", cyan: "#39d353", white: "#b1bac4",
-        brightBlack: "#6e7681", brightRed: "#ffa198", brightGreen: "#56d364",
-        brightYellow: "#e3b341", brightBlue: "#79c0ff", brightMagenta: "#d2a8ff",
-        brightCyan: "#56d364", brightWhite: "#f0f6fc",
-      }
-    },
-    light: {
-      bg: "transparent", sidebarBg: "rgba(246, 248, 250, 0.8)", termBg: "rgba(255, 255, 255, 0.9)",
-      border: "#d0d7de", textPrimary: "#1f2328", textSecondary: "#656d76",
-      termTheme: {
-        background: "#ffffff", foreground: "#1f2328", cursor: "#0969da", cursorAccent: "#ffffff",
-        selectionBackground: "rgba(9, 105, 218, 0.2)",
-        black: "#24292f", red: "#cf222e", green: "#116329", yellow: "#4d2d00",
-        blue: "#0969da", magenta: "#8250df", cyan: "#1b7c83", white: "#6e7781",
-        brightBlack: "#57606a", brightRed: "#a40e26", brightGreen: "#1a7f37",
-        brightYellow: "#633c01", brightBlue: "#218bff", brightMagenta: "#a475f9",
-        brightCyan: "#3192aa", brightWhite: "#8c959f",
-      }
-    }
-  };
-
   function applyTheme(themeName) {
-    currentTheme = themeName;
-    localStorage.setItem('clauge-theme', themeName);
-    const t = themes[themeName];
-    const root = document.documentElement;
-    root.style.setProperty('--sidebar-bg', t.sidebarBg);
-    root.style.setProperty('--term-bg', t.termBg);
-    root.style.setProperty('--border', t.border);
-    root.style.setProperty('--text-primary', t.textPrimary);
-    root.style.setProperty('--text-secondary', t.textSecondary);
-    root.style.setProperty('--accent', accentColor);
-    root.style.setProperty('--modal-bg', themeName === 'light' ? 'rgba(255, 255, 255, 0.95)' : '#161b22');
-    root.style.setProperty('--input-bg', themeName === 'light' ? '#f6f8fa' : '#0d1117');
-    root.style.setProperty('--hover-bg', themeName === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)');
-    root.style.setProperty('--btn-bg', themeName === 'light' ? '#f0f2f4' : '#21262d');
+    const { termTheme, cursor } = theme.applyTheme(themeName);
     // Update all existing terminals
     for (const [, entry] of terminalMap) {
-      if (entry.term) entry.term.options.theme = { ...t.termTheme, cursor: accentColor };
+      if (entry.term) entry.term.options.theme = { ...termTheme, cursor };
     }
   }
 
   function applyAccent(color) {
-    accentColor = color;
-    localStorage.setItem('clauge-accent', color);
-    document.documentElement.style.setProperty('--accent', color);
-    const theme = { ...themes[currentTheme].termTheme, cursor: color };
-    for (const [, entry] of terminalMap) { if (entry.term) entry.term.options.theme = theme; }
-    for (const [, entry] of shellMap) { if (entry.term) entry.term.options.theme = theme; }
+    const { termTheme, cursor } = theme.applyAccent(color);
+    for (const [, entry] of terminalMap) { if (entry.term) entry.term.options.theme = { ...termTheme, cursor }; }
+    for (const [, entry] of shellMap) { if (entry.term) entry.term.options.theme = { ...termTheme, cursor }; }
   }
 
   async function loadProfiles() {
@@ -222,7 +174,7 @@
 
   function getTermConfig() {
     return {
-      theme: { ...themes[currentTheme].termTheme, cursor: accentColor },
+      theme: theme.getTermTheme(),
       fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", "Source Code Pro", "IBM Plex Mono", "Menlo", "Monaco", "Consolas", monospace',
       fontSize: termFontSize, lineHeight: 1.4, cursorBlink: true, cursorStyle: "bar",
       scrollback: 10000,
@@ -1385,7 +1337,7 @@ Anti-patterns to avoid:
 
 
   onMount(() => {
-    applyTheme(currentTheme);
+    applyTheme(theme.currentTheme);
     invoke("get_app_version").then(v => {
       appVersion = v;
       checkWhatsNew(v);
@@ -1522,7 +1474,7 @@ Anti-patterns to avoid:
         </div>
       {/if}
       {#if activeProfile}
-        <div class="purpose-glow" style="background: linear-gradient(180deg, {purposeColors[activeProfile.purpose] || accentColor}15 0%, transparent 100%);"></div>
+        <div class="purpose-glow" style="background: linear-gradient(180deg, {purposeColors[activeProfile.purpose] || theme.accentColor}15 0%, transparent 100%);"></div>
       {/if}
       <div class="terminal-panel" bind:this={terminalEl}></div>
     </div>
@@ -1917,15 +1869,15 @@ Anti-patterns to avoid:
         <div class="stg-field">
           <span class="stg-label">Theme</span>
           <div class="chips">
-            <button class="chip" class:selected={currentTheme === 'dark'} onclick={() => applyTheme('dark')}>Dark</button>
-            <button class="chip" class:selected={currentTheme === 'light'} onclick={() => applyTheme('light')}>Light</button>
+            <button class="chip" class:selected={theme.currentTheme === 'dark'} onclick={() => applyTheme('dark')}>Dark</button>
+            <button class="chip" class:selected={theme.currentTheme === 'light'} onclick={() => applyTheme('light')}>Light</button>
           </div>
         </div>
         <div class="stg-field">
           <span class="stg-label">Accent Color</span>
           <div class="accent-row">
             {#each ['#58a6ff', '#d2a8ff', '#3fb950', '#f85149', '#d29922', '#ff7b72'] as color}
-              <button class="color-dot" style="background:{color};{accentColor === color ? 'box-shadow:0 0 0 2px var(--text-primary);' : ''}"
+              <button class="color-dot" style="background:{color};{theme.accentColor === color ? 'box-shadow:0 0 0 2px var(--text-primary);' : ''}"
                 onclick={() => applyAccent(color)} title={color}></button>
             {/each}
           </div>
