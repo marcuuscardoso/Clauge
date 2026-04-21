@@ -9,6 +9,7 @@
   import { updater } from "$lib/stores/updater.svelte";
   import { pluginsStore } from "$lib/stores/plugins.svelte";
   import { contextsStore } from "$lib/stores/contexts.svelte";
+  import { usageStore } from "$lib/stores/usage.svelte";
 
   let profiles = $state([]);
   let activeProfile = $state(null);
@@ -21,14 +22,8 @@
   let statusMsg = $state("Ready");
   let tokenUsage = $state(null);
   let tokenInterval = null;
-  let usageLimits = $state(null);
-  let sessionKeyInput = $state('');
   let appVersion = $state('');
   let claudePlan = $state('');
-  let sessionKeyConfigured = $state(false);
-  let usageError = $state('');
-  let showKeyEdit = $state(false);
-  let usageRefreshInterval = null;
   let sidebarCollapsed = $state(
     typeof localStorage !== 'undefined' ? localStorage.getItem('clauge-sidebar-collapsed') === 'true' : false
   );
@@ -80,12 +75,6 @@
   let gitBehind = $state(0);
   let gitMsg = $state('');
 
-  // Usage dashboard
-  let showDashboard = $state(false);
-  let dashboardData = $state(null);
-  let dashboardLoading = $state(false);
-  let dashboardDays = $state(30);
-  let usageRefreshMins = $state(typeof localStorage !== 'undefined' ? parseInt(localStorage.getItem('clauge-usage-refresh') || '5') : 5);
   let gitDiff = $state('');
   let gitDiffFile = $state('');
   let gitCommits = $state([]);
@@ -859,28 +848,6 @@
     }
   }
 
-  async function loadDashboard() {
-    dashboardLoading = true;
-    try {
-      dashboardData = await invoke("get_usage_analytics", { days: dashboardDays });
-    } catch(e) { console.error('Dashboard failed:', e); dashboardData = null; }
-    dashboardLoading = false;
-  }
-
-  function formatCost(v) { return v < 0.01 ? '<$0.01' : `$${v.toFixed(2)}`; }
-  function formatTokens(v) { return v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(1)}k` : String(v); }
-  function decodeProjectName(encoded) {
-    // Encoded paths use - for / and - for . — extract the last meaningful part
-    const parts = encoded.split('-').filter(Boolean);
-    // Find the last non-trivial segment (skip Users, macbook, etc.)
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (parts[i].length > 2 && !['Users','home','macbook','Personal','Projects','Documents','Desktop','Work'].includes(parts[i])) {
-        return parts[i];
-      }
-    }
-    return parts[parts.length - 1] || encoded;
-  }
-
   async function loadExistingSessions(path) {
     try {
       const sessions = await invoke("discover_sessions", { projectPath: path });
@@ -1062,45 +1029,6 @@ Anti-patterns to avoid:
 
 
 
-  async function loadUsageLimits() {
-    usageError = '';
-    try {
-      const key = await invoke("load_session_key");
-      if (!key) { sessionKeyConfigured = false; return; }
-
-      const usage = await invoke("fetch_usage_limits", { sessionKey: key });
-
-      usageLimits = {
-        sessionPercent: usage.five_hour?.utilization || 0,
-        sessionResets: usage.five_hour?.resets_at || "",
-        weeklyAllPercent: usage.seven_day?.utilization || 0,
-        weeklyAllResets: usage.seven_day?.resets_at || "",
-        weeklySonnetPercent: usage.seven_day_sonnet?.utilization ?? null,
-        weeklySonnetResets: usage.seven_day_sonnet?.resets_at ?? null,
-      };
-      usageError = '';
-
-      const s = Math.round(usageLimits.sessionPercent);
-      const w = Math.round(usageLimits.weeklyAllPercent);
-      await invoke("update_tray_title", { title: `S:${s}% W:${w}%` }).catch(() => {});
-    } catch(e) {
-      console.error("Usage limits failed:", e);
-      const err = String(e).toLowerCase();
-      usageLimits = null;
-      await invoke("update_tray_title", { title: "" }).catch(() => {});
-
-      // Detect auth failures — session key expired or invalid
-      if (err.includes('permission') || err.includes('unauthorized') || err.includes('invalid') || err.includes('403') || err.includes('401')) {
-        sessionKeyConfigured = false;
-        usageError = 'Session key expired or invalid. Please reconnect.';
-        if (usageRefreshInterval) { clearInterval(usageRefreshInterval); usageRefreshInterval = null; }
-      } else {
-        usageError = 'Failed to fetch usage data. Try again.';
-      }
-    }
-  }
-
-
   onMount(() => {
     applyTheme(theme.currentTheme);
     invoke("get_app_version").then(v => {
@@ -1130,10 +1058,10 @@ Anti-patterns to avoid:
     // Priority 2: Load session key + usage limits (fast key read, then ~1.5s API call)
     invoke("load_session_key").then(savedKey => {
       if (savedKey) {
-        sessionKeyInput = savedKey;
-        sessionKeyConfigured = true;
-        loadUsageLimits();
-        usageRefreshInterval = setInterval(loadUsageLimits, 5 * 60 * 1000);
+        usageStore.sessionKeyInput = savedKey;
+        usageStore.sessionKeyConfigured = true;
+        usageStore.loadUsageLimits();
+        usageStore.startRefreshInterval();
       }
     }).catch(() => {});
 
@@ -1269,7 +1197,7 @@ Anti-patterns to avoid:
             <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
             Plugins
           </button>
-          <button class="pm-item" onclick={() => { profileMenuOpen = false; showDashboard = true; loadDashboard(); }}>
+          <button class="pm-item" onclick={() => { profileMenuOpen = false; usageStore.showDashboard = true; usageStore.loadDashboard(); }}>
             <svg viewBox="0 0 24 24"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
             Usage Dashboard
           </button>
@@ -1413,23 +1341,23 @@ Anti-patterns to avoid:
     {/if}
   </div>
   <div class="bottom-center">
-    {#if usageLimits}
-      {@const sColor = usageLimits.sessionPercent > 80 ? '#f85149' : usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}
-      {@const wColor = usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}
+    {#if usageStore.usageLimits}
+      {@const sColor = usageStore.usageLimits.sessionPercent > 80 ? '#f85149' : usageStore.usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}
+      {@const wColor = usageStore.usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageStore.usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-      <div class="usage-chips-clickable" onclick={() => { showDashboard = true; loadDashboard(); }}>
-        <div class="usage-chip"><span class="usage-dot" style="background:{sColor};box-shadow:0 0 6px {sColor}44;"></span><span class="usage-lbl">Session</span><span class="usage-val" style="color:{sColor}">{usageLimits.sessionPercent.toFixed(0)}%</span></div>
+      <div class="usage-chips-clickable" onclick={() => { usageStore.showDashboard = true; usageStore.loadDashboard(); }}>
+        <div class="usage-chip"><span class="usage-dot" style="background:{sColor};box-shadow:0 0 6px {sColor}44;"></span><span class="usage-lbl">Session</span><span class="usage-val" style="color:{sColor}">{usageStore.usageLimits.sessionPercent.toFixed(0)}%</span></div>
         <div class="usage-sep"></div>
-        <div class="usage-chip"><span class="usage-dot" style="background:{wColor};box-shadow:0 0 6px {wColor}44;"></span><span class="usage-lbl">Weekly</span><span class="usage-val" style="color:{wColor}">{usageLimits.weeklyAllPercent.toFixed(0)}%</span></div>
-        {#if usageLimits.weeklySonnetPercent != null}
-          {@const snColor = usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'}
+        <div class="usage-chip"><span class="usage-dot" style="background:{wColor};box-shadow:0 0 6px {wColor}44;"></span><span class="usage-lbl">Weekly</span><span class="usage-val" style="color:{wColor}">{usageStore.usageLimits.weeklyAllPercent.toFixed(0)}%</span></div>
+        {#if usageStore.usageLimits.weeklySonnetPercent != null}
+          {@const snColor = usageStore.usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageStore.usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'}
           <div class="usage-sep"></div>
-          <div class="usage-chip"><span class="usage-dot" style="background:{snColor};box-shadow:0 0 6px {snColor}44;"></span><span class="usage-lbl">Sonnet</span><span class="usage-val" style="color:{snColor}">{usageLimits.weeklySonnetPercent.toFixed(0)}%</span></div>
+          <div class="usage-chip"><span class="usage-dot" style="background:{snColor};box-shadow:0 0 6px {snColor}44;"></span><span class="usage-lbl">Sonnet</span><span class="usage-val" style="color:{snColor}">{usageStore.usageLimits.weeklySonnetPercent.toFixed(0)}%</span></div>
         {/if}
       </div>
     {:else}
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-      <span class="limit-loading" onclick={() => { showDashboard = true; loadDashboard(); }} style="cursor:pointer;">
+      <span class="limit-loading" onclick={() => { usageStore.showDashboard = true; usageStore.loadDashboard(); }} style="cursor:pointer;">
         Set up usage tracking
       </span>
     {/if}
@@ -1885,49 +1813,49 @@ Anti-patterns to avoid:
 </div>
 {/if}
 
-{#if showDashboard}
+{#if usageStore.showDashboard}
 <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 <div class="modal-backdrop">
   <div class="dash-modal">
     <div class="dash-header">
       <span class="dash-title">Usage Dashboard {#if claudePlan}<span class="dash-plan-badge">{claudePlan}</span>{/if}</span>
       <div class="dash-header-right">
-        <select class="dash-period" bind:value={dashboardDays} onchange={() => loadDashboard()}>
+        <select class="dash-period" bind:value={usageStore.dashboardDays} onchange={() => usageStore.loadDashboard()}>
           <option value={7}>7 days</option>
           <option value={30}>30 days</option>
           <option value={90}>90 days</option>
           <option value={9999}>All time</option>
         </select>
-        <button class="stg-close" onclick={() => showDashboard = false}>&times;</button>
+        <button class="stg-close" onclick={() => usageStore.showDashboard = false}>&times;</button>
       </div>
     </div>
-    {#if dashboardLoading}
+    {#if usageStore.dashboardLoading}
       <div class="dash-loading"><div class="dash-spinner"></div>Analyzing sessions...</div>
-    {:else if dashboardData}
+    {:else if usageStore.dashboardData}
       <div class="dash-body">
         <div class="dash-stats">
-          <div class="dash-stat"><span class="dash-stat-value">{formatCost(dashboardData.totalCost)}</span><span class="dash-stat-label">Total Cost</span></div>
-          <div class="dash-stat"><span class="dash-stat-value">{dashboardData.totalApiCalls.toLocaleString()}</span><span class="dash-stat-label">API Calls</span></div>
-          <div class="dash-stat"><span class="dash-stat-value">{dashboardData.cacheHitPercent.toFixed(1)}%</span><span class="dash-stat-label">Cache Hit</span></div>
-          <div class="dash-stat"><span class="dash-stat-value">{dashboardData.totalSessions}</span><span class="dash-stat-label">Sessions</span></div>
+          <div class="dash-stat"><span class="dash-stat-value">{usageStore.formatCost(usageStore.dashboardData.totalCost)}</span><span class="dash-stat-label">Total Cost</span></div>
+          <div class="dash-stat"><span class="dash-stat-value">{usageStore.dashboardData.totalApiCalls.toLocaleString()}</span><span class="dash-stat-label">API Calls</span></div>
+          <div class="dash-stat"><span class="dash-stat-value">{usageStore.dashboardData.cacheHitPercent.toFixed(1)}%</span><span class="dash-stat-label">Cache Hit</span></div>
+          <div class="dash-stat"><span class="dash-stat-value">{usageStore.dashboardData.totalSessions}</span><span class="dash-stat-label">Sessions</span></div>
         </div>
 
         <!-- Row 2: Tokens -->
         <div class="dash-tokens-bar">
-          <span><strong>In:</strong> {formatTokens(dashboardData.totalInputTokens)}</span>
-          <span><strong>Out:</strong> {formatTokens(dashboardData.totalOutputTokens)}</span>
-          <span><strong>Cache R:</strong> {formatTokens(dashboardData.totalCacheReadTokens)}</span>
-          <span><strong>Cache W:</strong> {formatTokens(dashboardData.totalCacheWriteTokens)}</span>
+          <span><strong>In:</strong> {usageStore.formatTokens(usageStore.dashboardData.totalInputTokens)}</span>
+          <span><strong>Out:</strong> {usageStore.formatTokens(usageStore.dashboardData.totalOutputTokens)}</span>
+          <span><strong>Cache R:</strong> {usageStore.formatTokens(usageStore.dashboardData.totalCacheReadTokens)}</span>
+          <span><strong>Cache W:</strong> {usageStore.formatTokens(usageStore.dashboardData.totalCacheWriteTokens)}</span>
         </div>
 
         <!-- Row 3: Chart -->
-        {#if dashboardData.daily.length > 0}
+        {#if usageStore.dashboardData.daily.length > 0}
           <div class="dash-section">
             <div class="dash-section-label">Daily Activity</div>
             <div class="dash-chart">
-              {#each dashboardData.daily.slice(-21) as day}
-                {@const mc = Math.max(...dashboardData.daily.slice(-21).map(d => d.cost), 0.01)}
-                <div class="dash-bar-wrap" title="{day.date}: {formatCost(day.cost)} · {day.calls} calls">
+              {#each usageStore.dashboardData.daily.slice(-21) as day}
+                {@const mc = Math.max(...usageStore.dashboardData.daily.slice(-21).map(d => d.cost), 0.01)}
+                <div class="dash-bar-wrap" title="{day.date}: {usageStore.formatCost(day.cost)} · {day.calls} calls">
                   <div class="dash-bar" style="height:{Math.max(3, (day.cost / mc) * 100)}%"></div>
                   <span class="dash-bar-label">{day.date.slice(8)}</span>
                 </div>
@@ -1940,52 +1868,51 @@ Anti-patterns to avoid:
         <div class="dash-grid">
           <div class="dash-section">
             <div class="dash-section-label">Live Usage</div>
-            {#if usageLimits}
+            {#if usageStore.usageLimits}
               <div style="display:flex;flex-direction:column;gap:8px;">
                 <div class="dash-live-row">
                   <span class="dash-live-lbl">Session</span>
-                  <div class="dash-live-bar"><div style="width:{usageLimits.sessionPercent}%;background:{usageLimits.sessionPercent > 80 ? '#f85149' : usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'};height:100%;border-radius:2px;"></div></div>
-                  <span class="dash-live-pct" style="color:{usageLimits.sessionPercent > 80 ? '#f85149' : usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}">{usageLimits.sessionPercent.toFixed(1)}%</span>
+                  <div class="dash-live-bar"><div style="width:{usageStore.usageLimits.sessionPercent}%;background:{usageStore.usageLimits.sessionPercent > 80 ? '#f85149' : usageStore.usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'};height:100%;border-radius:2px;"></div></div>
+                  <span class="dash-live-pct" style="color:{usageStore.usageLimits.sessionPercent > 80 ? '#f85149' : usageStore.usageLimits.sessionPercent > 50 ? '#d29922' : 'var(--accent)'}">{usageStore.usageLimits.sessionPercent.toFixed(1)}%</span>
                 </div>
                 <div class="dash-live-row">
                   <span class="dash-live-lbl">Weekly</span>
-                  <div class="dash-live-bar"><div style="width:{usageLimits.weeklyAllPercent}%;background:{usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'};height:100%;border-radius:2px;"></div></div>
-                  <span class="dash-live-pct" style="color:{usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}">{usageLimits.weeklyAllPercent.toFixed(1)}%</span>
+                  <div class="dash-live-bar"><div style="width:{usageStore.usageLimits.weeklyAllPercent}%;background:{usageStore.usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageStore.usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'};height:100%;border-radius:2px;"></div></div>
+                  <span class="dash-live-pct" style="color:{usageStore.usageLimits.weeklyAllPercent > 80 ? '#f85149' : usageStore.usageLimits.weeklyAllPercent > 50 ? '#d29922' : 'var(--accent)'}">{usageStore.usageLimits.weeklyAllPercent.toFixed(1)}%</span>
                 </div>
-                {#if usageLimits.weeklySonnetPercent != null}
+                {#if usageStore.usageLimits.weeklySonnetPercent != null}
                   <div class="dash-live-row">
                     <span class="dash-live-lbl">Sonnet</span>
-                    <div class="dash-live-bar"><div style="width:{usageLimits.weeklySonnetPercent}%;background:{usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'};height:100%;border-radius:2px;"></div></div>
-                    <span class="dash-live-pct" style="color:{usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'}">{usageLimits.weeklySonnetPercent.toFixed(1)}%</span>
+                    <div class="dash-live-bar"><div style="width:{usageStore.usageLimits.weeklySonnetPercent}%;background:{usageStore.usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageStore.usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'};height:100%;border-radius:2px;"></div></div>
+                    <span class="dash-live-pct" style="color:{usageStore.usageLimits.weeklySonnetPercent > 80 ? '#f85149' : usageStore.usageLimits.weeklySonnetPercent > 50 ? '#d29922' : 'var(--accent)'}">{usageStore.usageLimits.weeklySonnetPercent.toFixed(1)}%</span>
                   </div>
                 {/if}
               </div>
-              {#if showKeyEdit}
+              {#if usageStore.showKeyEdit}
                 <div style="margin-top:8px;">
-                  <input type="password" bind:value={sessionKeyInput} placeholder="sk-ant-sid01-..." style="padding:5px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--text-primary);font-size:11px;width:100%;margin-bottom:4px;" />
+                  <input type="password" bind:value={usageStore.sessionKeyInput} placeholder="sk-ant-sid01-..." style="padding:5px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--text-primary);font-size:11px;width:100%;margin-bottom:4px;" />
                   <div style="display:flex;gap:6px;">
                     <button class="save-key-btn" onclick={async () => {
-                      if (sessionKeyInput.trim()) {
-                        await invoke("save_session_key", { key: sessionKeyInput.trim() });
-                        sessionKeyConfigured = true; showKeyEdit = false;
-                        await loadUsageLimits();
+                      if (usageStore.sessionKeyInput.trim()) {
+                        await invoke("save_session_key", { key: usageStore.sessionKeyInput.trim() });
+                        usageStore.sessionKeyConfigured = true; usageStore.showKeyEdit = false;
+                        await usageStore.loadUsageLimits();
                       }
                     }}>Save</button>
-                    <button class="save-key-btn" style="color:var(--text-secondary);border-color:var(--border);" onclick={() => showKeyEdit = false}>Cancel</button>
+                    <button class="save-key-btn" style="color:var(--text-secondary);border-color:var(--border);" onclick={() => usageStore.showKeyEdit = false}>Cancel</button>
                   </div>
                 </div>
               {:else}
                 <div style="display:flex;align-items:center;gap:6px;margin-top:8px;">
                   <span style="font-size:9px;color:var(--text-secondary);">Refresh every</span>
-                  <select class="dash-refresh-select" bind:value={usageRefreshMins} onchange={() => {
-                    localStorage.setItem('clauge-usage-refresh', String(usageRefreshMins));
-                    if (usageRefreshInterval) clearInterval(usageRefreshInterval);
-                    usageRefreshInterval = setInterval(loadUsageLimits, usageRefreshMins * 60 * 1000);
+                  <select class="dash-refresh-select" bind:value={usageStore.usageRefreshMins} onchange={() => {
+                    localStorage.setItem('clauge-usage-refresh', String(usageStore.usageRefreshMins));
+                    usageStore.startRefreshInterval();
                   }}>
                     <option value={5}>5 min</option><option value={15}>15 min</option><option value={30}>30 min</option>
                     <option value={60}>1 hour</option><option value={360}>6 hours</option><option value={720}>12 hours</option>
                   </select>
-                  <button class="dash-edit-key" onclick={() => showKeyEdit = true} title="Update session key">
+                  <button class="dash-edit-key" onclick={() => usageStore.showKeyEdit = true} title="Update session key">
                     Session Key
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                   </button>
@@ -1994,14 +1921,14 @@ Anti-patterns to avoid:
             {:else}
               <div style="padding:8px 0;">
                 <p style="font-size:11px;color:var(--text-secondary);margin:0 0 8px;">Connect to see live session limits</p>
-                <input type="password" bind:value={sessionKeyInput} placeholder="sk-ant-sid01-..." style="padding:5px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--text-primary);font-size:11px;width:100%;margin-bottom:6px;" />
+                <input type="password" bind:value={usageStore.sessionKeyInput} placeholder="sk-ant-sid01-..." style="padding:5px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--text-primary);font-size:11px;width:100%;margin-bottom:6px;" />
                 <p style="font-size:9px;color:var(--text-secondary);margin:0 0 6px;">claude.ai → DevTools → Cookies → sessionKey</p>
                 <button class="save-key-btn" onclick={async () => {
-                  if (sessionKeyInput.trim()) {
-                    await invoke("save_session_key", { key: sessionKeyInput.trim() });
-                    sessionKeyConfigured = true; usageError = '';
-                    await loadUsageLimits();
-                    usageRefreshInterval = setInterval(loadUsageLimits, usageRefreshMins * 60 * 1000);
+                  if (usageStore.sessionKeyInput.trim()) {
+                    await invoke("save_session_key", { key: usageStore.sessionKeyInput.trim() });
+                    usageStore.sessionKeyConfigured = true; usageStore.usageError = '';
+                    await usageStore.loadUsageLimits();
+                    usageStore.startRefreshInterval();
                   }
                 }}>Connect</button>
               </div>
@@ -2009,10 +1936,10 @@ Anti-patterns to avoid:
           </div>
           <div class="dash-section">
             <div class="dash-section-label">Models</div>
-            {#each dashboardData.byModel as m}
+            {#each usageStore.dashboardData.byModel as m}
               <div class="dash-model-row">
                 <div class="dash-model-info"><span class="dash-model-name">{m.model}</span><span class="dash-model-meta">{m.calls} calls · {m.cacheHitPercent.toFixed(0)}% cache</span></div>
-                <span class="dash-model-cost">{formatCost(m.cost)}</span>
+                <span class="dash-model-cost">{usageStore.formatCost(m.cost)}</span>
               </div>
             {/each}
           </div>
@@ -2021,12 +1948,12 @@ Anti-patterns to avoid:
         <!-- Row 5: Projects + Top Sessions -->
         <div class="dash-grid">
           <div class="dash-section">
-            <div class="dash-section-label">Projects ({dashboardData.byProject.length})</div>
+            <div class="dash-section-label">Projects ({usageStore.dashboardData.byProject.length})</div>
             <div class="dash-scroll">
-              {#each dashboardData.byProject as p}
+              {#each usageStore.dashboardData.byProject as p}
                 <div class="dash-model-row">
-                  <div class="dash-model-info"><span class="dash-model-name" title={p.project}>{decodeProjectName(p.project)}</span><span class="dash-model-meta">{p.sessions} sess · {p.calls} calls</span></div>
-                  <span class="dash-model-cost">{formatCost(p.cost)}</span>
+                  <div class="dash-model-info"><span class="dash-model-name" title={p.project}>{usageStore.decodeProjectName(p.project)}</span><span class="dash-model-meta">{p.sessions} sess · {p.calls} calls</span></div>
+                  <span class="dash-model-cost">{usageStore.formatCost(p.cost)}</span>
                 </div>
               {/each}
             </div>
@@ -2034,10 +1961,10 @@ Anti-patterns to avoid:
           <div class="dash-section">
             <div class="dash-section-label">Top Sessions</div>
             <div class="dash-scroll">
-              {#each dashboardData.topSessions as s}
+              {#each usageStore.dashboardData.topSessions as s}
                 <div class="dash-model-row">
-                  <div class="dash-model-info"><span class="dash-model-name" title={s.project}>{decodeProjectName(s.project)}</span><span class="dash-model-meta">{s.model} · {s.sessionId.slice(0, 8)}</span></div>
-                  <span class="dash-model-cost">{formatCost(s.cost)}</span>
+                  <div class="dash-model-info"><span class="dash-model-name" title={s.project}>{usageStore.decodeProjectName(s.project)}</span><span class="dash-model-meta">{s.model} · {s.sessionId.slice(0, 8)}</span></div>
+                  <span class="dash-model-cost">{usageStore.formatCost(s.cost)}</span>
                 </div>
               {/each}
             </div>
@@ -2048,20 +1975,20 @@ Anti-patterns to avoid:
         <div class="dash-grid">
           <div class="dash-section">
             <div class="dash-section-label">Tools</div>
-            {#each dashboardData.tools.slice(0, 6) as t}
+            {#each usageStore.dashboardData.tools.slice(0, 6) as t}
               <div class="dash-tool-row">
                 <span class="dash-tool-name">{t.name}</span>
-                <div class="dash-tool-bar-bg"><div class="dash-tool-bar-fill" style="width:{Math.max(3, (t.count / (dashboardData.tools[0]?.count || 1)) * 100)}%"></div></div>
+                <div class="dash-tool-bar-bg"><div class="dash-tool-bar-fill" style="width:{Math.max(3, (t.count / (usageStore.dashboardData.tools[0]?.count || 1)) * 100)}%"></div></div>
                 <span class="dash-tool-count">{t.count.toLocaleString()}</span>
               </div>
             {/each}
           </div>
           <div class="dash-section">
             <div class="dash-section-label">Shell</div>
-            {#each dashboardData.shellCommands.slice(0, 6) as s}
+            {#each usageStore.dashboardData.shellCommands.slice(0, 6) as s}
               <div class="dash-tool-row">
                 <span class="dash-tool-name" style="font-family:monospace;">{s.name}</span>
-                <div class="dash-tool-bar-bg"><div class="dash-tool-bar-fill" style="width:{Math.max(3, (s.count / (dashboardData.shellCommands[0]?.count || 1)) * 100)}%"></div></div>
+                <div class="dash-tool-bar-bg"><div class="dash-tool-bar-fill" style="width:{Math.max(3, (s.count / (usageStore.dashboardData.shellCommands[0]?.count || 1)) * 100)}%"></div></div>
                 <span class="dash-tool-count">{s.count.toLocaleString()}</span>
               </div>
             {/each}
