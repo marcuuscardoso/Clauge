@@ -7,18 +7,13 @@
   import { theme } from "$lib/stores/theme.svelte";
   import { notifications } from "$lib/stores/notifications.svelte";
   import { updater } from "$lib/stores/updater.svelte";
+  import { pluginsStore } from "$lib/stores/plugins.svelte";
 
   let profiles = $state([]);
   let activeProfile = $state(null);
   let showModal = $state(false);
   let showSettings = $state(false);
   let settingsTab = $state('settings');
-  let claudePlugins = $state([]);
-  let marketplacePlugins = $state([]);
-  let pluginSearch = $state('');
-  let installingPlugin = $state('');
-  let pluginTab = $state('installed');
-
   // Context manager
   let contextSnippets = $state([]);
   let contextEditing = $state(null); // { name, content } or null
@@ -1100,45 +1095,6 @@ Anti-patterns to avoid:
     } catch(_) {}
   }
 
-  async function loadClaudePlugins() {
-    try { claudePlugins = await invoke("get_claude_plugins"); } catch(_) { claudePlugins = []; }
-    try { marketplacePlugins = await invoke("get_marketplace_plugins"); } catch(_) { marketplacePlugins = []; }
-  }
-  async function togglePlugin(plugin) {
-    const key = `${plugin.name}@${plugin.marketplace}`;
-    try { await invoke("toggle_claude_plugin", { pluginKey: key, enabled: !plugin.enabled }); await loadClaudePlugins(); } catch(_) {}
-  }
-  let pluginMsg = $state('');
-  async function installPlugin(plugin) {
-    installingPlugin = plugin.name;
-    pluginMsg = '';
-    try {
-      await invoke("install_plugin", { name: plugin.name, marketplace: plugin.marketplace });
-      await invoke("toggle_claude_plugin", { pluginKey: `${plugin.name}@${plugin.marketplace}`, enabled: true });
-      await loadClaudePlugins();
-      pluginMsg = `${plugin.name} installed`;
-      setTimeout(() => { if (pluginMsg.includes('installed')) pluginMsg = ''; }, 3000);
-    } catch(e) {
-      pluginMsg = `Failed: ${String(e).slice(0, 60)}`;
-      setTimeout(() => { pluginMsg = ''; }, 5000);
-    }
-    installingPlugin = '';
-  }
-  let pluginUninstallConfirm = $state(null);
-  async function uninstallPlugin(plugin) {
-    pluginMsg = '';
-    try {
-      await invoke("uninstall_plugin", { name: plugin.name, marketplace: plugin.marketplace });
-      await loadClaudePlugins();
-      pluginMsg = `${plugin.name} uninstalled`;
-      setTimeout(() => { if (pluginMsg.includes('uninstalled')) pluginMsg = ''; }, 3000);
-    } catch(e) {
-      pluginMsg = `Uninstall failed: ${String(e).slice(0, 60)}`;
-      setTimeout(() => { pluginMsg = ''; }, 5000);
-    }
-    pluginUninstallConfirm = null;
-  }
-
   async function loadUsageLimits() {
     usageError = '';
     try {
@@ -1342,7 +1298,7 @@ Anti-patterns to avoid:
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z"/></svg>
             Settings
           </button>
-          <button class="pm-item" onclick={() => { profileMenuOpen = false; showSettings = true; settingsTab = 'plugins'; loadClaudePlugins(); }}>
+          <button class="pm-item" onclick={() => { profileMenuOpen = false; showSettings = true; settingsTab = 'plugins'; pluginsStore.loadClaudePlugins(); }}>
             <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
             Plugins
           </button>
@@ -1690,7 +1646,7 @@ Anti-patterns to avoid:
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v1m0 16v1m-9-9h1m16 0h1m-2.636-6.364l-.707.707M6.343 17.657l-.707.707m0-12.728l.707.707m11.314 11.314l.707.707" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
           Appearance
         </button>
-        <button class="stg-tab" class:active={settingsTab === 'plugins'} onclick={() => { settingsTab = 'plugins'; loadClaudePlugins(); }}>
+        <button class="stg-tab" class:active={settingsTab === 'plugins'} onclick={() => { settingsTab = 'plugins'; pluginsStore.loadClaudePlugins(); }}>
           <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
           Plugins
         </button>
@@ -1746,23 +1702,23 @@ Anti-patterns to avoid:
 
     {:else if settingsTab === 'plugins'}
       <div class="plugin-subtabs">
-        <button class="plugin-subtab" class:active={pluginTab === 'installed'} onclick={() => pluginTab = 'installed'}>Installed ({claudePlugins.length})</button>
-        <button class="plugin-subtab" class:active={pluginTab === 'marketplace'} onclick={() => pluginTab = 'marketplace'}>Marketplace</button>
+        <button class="plugin-subtab" class:active={pluginsStore.pluginTab === 'installed'} onclick={() => pluginsStore.pluginTab = 'installed'}>Installed ({pluginsStore.claudePlugins.length})</button>
+        <button class="plugin-subtab" class:active={pluginsStore.pluginTab === 'marketplace'} onclick={() => pluginsStore.pluginTab = 'marketplace'}>Marketplace</button>
       </div>
-      {#if pluginMsg}
-        <div class="plugin-msg" class:error={pluginMsg.startsWith('Failed')}>{pluginMsg}</div>
+      {#if pluginsStore.pluginMsg}
+        <div class="plugin-msg" class:error={pluginsStore.pluginMsg.startsWith('Failed')}>{pluginsStore.pluginMsg}</div>
       {/if}
 
-      {#if pluginTab === 'installed'}
-        {#if claudePlugins.length === 0}
+      {#if pluginsStore.pluginTab === 'installed'}
+        {#if pluginsStore.claudePlugins.length === 0}
           <div class="plugin-empty">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
             <p>No plugins installed</p>
-            <button class="plugin-browse-btn" onclick={() => pluginTab = 'marketplace'}>Browse Marketplace</button>
+            <button class="plugin-browse-btn" onclick={() => pluginsStore.pluginTab = 'marketplace'}>Browse Marketplace</button>
           </div>
         {:else}
           <div class="plugins-list">
-            {#each claudePlugins as plugin}
+            {#each pluginsStore.claudePlugins as plugin}
               <div class="plugin-card">
                 <div class="plugin-icon">{plugin.name.charAt(0).toUpperCase()}</div>
                 <div class="plugin-info">
@@ -1770,10 +1726,10 @@ Anti-patterns to avoid:
                   <span class="plugin-cmd">{plugin.marketplace}{plugin.version && plugin.version !== 'unknown' ? ` · v${plugin.version}` : ''}</span>
                 </div>
                 <div class="plugin-actions">
-                  <button class="toggle-switch plugin-toggle" class:on={plugin.enabled} onclick={() => togglePlugin(plugin)}>
+                  <button class="toggle-switch plugin-toggle" class:on={plugin.enabled} onclick={() => pluginsStore.togglePlugin(plugin)}>
                     <span class="toggle-knob"></span>
                   </button>
-                  <button class="plugin-uninstall" onclick={() => pluginUninstallConfirm = plugin} title="Uninstall">
+                  <button class="plugin-uninstall" onclick={() => pluginsStore.pluginUninstallConfirm = plugin} title="Uninstall">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zM11 3V1.75A1.75 1.75 0 009.25 0h-2.5A1.75 1.75 0 005 1.75V3H2.75a.75.75 0 000 1.5h.928l.747 10.218A1.75 1.75 0 006.172 16h3.656a1.75 1.75 0 001.747-1.282L12.322 4.5h.928a.75.75 0 000-1.5H11z"/></svg>
                   </button>
                 </div>
@@ -1783,10 +1739,10 @@ Anti-patterns to avoid:
         {/if}
       {:else}
         <div style="margin-bottom:12px;">
-          <input class="plugin-search full" type="text" bind:value={pluginSearch} placeholder="Search plugins..." />
+          <input class="plugin-search full" type="text" bind:value={pluginsStore.pluginSearch} placeholder="Search plugins..." />
         </div>
         <div class="plugins-list marketplace">
-          {#each marketplacePlugins.filter(p => !p.installed && (!pluginSearch || p.name.toLowerCase().includes(pluginSearch.toLowerCase()) || (p.description || '').toLowerCase().includes(pluginSearch.toLowerCase()))) as plugin}
+          {#each pluginsStore.marketplacePlugins.filter(p => !p.installed && (!pluginsStore.pluginSearch || p.name.toLowerCase().includes(pluginsStore.pluginSearch.toLowerCase()) || (p.description || '').toLowerCase().includes(pluginsStore.pluginSearch.toLowerCase()))) as plugin}
             <div class="plugin-card">
               <div class="plugin-icon mp">{plugin.name.charAt(0).toUpperCase()}</div>
               <div class="plugin-info">
@@ -1796,8 +1752,8 @@ Anti-patterns to avoid:
               {#if plugin.installs}
                 <span class="plugin-installs">{plugin.installs >= 1000 ? `${(plugin.installs / 1000).toFixed(0)}k` : plugin.installs}</span>
               {/if}
-              <button class="plugin-install-btn" disabled={installingPlugin === plugin.name} onclick={() => installPlugin(plugin)}>
-                {installingPlugin === plugin.name ? 'Installing...' : 'Install'}
+              <button class="plugin-install-btn" disabled={pluginsStore.installingPlugin === plugin.name} onclick={() => pluginsStore.installPlugin(plugin)}>
+                {pluginsStore.installingPlugin === plugin.name ? 'Installing...' : 'Install'}
               </button>
             </div>
           {:else}
@@ -2218,19 +2174,19 @@ Anti-patterns to avoid:
 </div>
 {/if}
 
-{#if pluginUninstallConfirm}
+{#if pluginsStore.pluginUninstallConfirm}
 <div class="modal-backdrop" style="z-index:1100;">
   <div class="modal" style="max-width:360px;animation:slideIn 0.15s ease-out;">
     <div style="text-align:center;padding:20px 20px 0;">
       <svg width="32" height="32" viewBox="0 0 16 16" fill="#f85149" style="margin-bottom:12px;"><path d="M6.5 1.75a.25.25 0 01.25-.25h2.5a.25.25 0 01.25.25V3h-3V1.75zM11 3V1.75A1.75 1.75 0 009.25 0h-2.5A1.75 1.75 0 005 1.75V3H2.75a.75.75 0 000 1.5h.928l.747 10.218A1.75 1.75 0 006.172 16h3.656a1.75 1.75 0 001.747-1.282L12.322 4.5h.928a.75.75 0 000-1.5H11z"/></svg>
       <h2 style="font-size:15px;margin-bottom:8px;">Uninstall plugin?</h2>
       <p style="font-size:13px;color:var(--text-secondary);line-height:1.5;">
-        Are you sure you want to uninstall <strong style="color:var(--text-primary);">{pluginUninstallConfirm.name}</strong>?
+        Are you sure you want to uninstall <strong style="color:var(--text-primary);">{pluginsStore.pluginUninstallConfirm.name}</strong>?
       </p>
     </div>
     <div class="modal-actions" style="padding:16px 20px;">
-      <button onclick={() => pluginUninstallConfirm = null}>Cancel</button>
-      <button style="background:#f85149 !important;border-color:transparent !important;color:#fff !important;" onclick={() => uninstallPlugin(pluginUninstallConfirm)}>Uninstall</button>
+      <button onclick={() => pluginsStore.pluginUninstallConfirm = null}>Cancel</button>
+      <button style="background:#f85149 !important;border-color:transparent !important;color:#fff !important;" onclick={() => pluginsStore.uninstallPlugin(pluginsStore.pluginUninstallConfirm)}>Uninstall</button>
     </div>
   </div>
 </div>
