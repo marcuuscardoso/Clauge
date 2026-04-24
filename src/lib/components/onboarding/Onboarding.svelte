@@ -23,7 +23,7 @@
   let ghUsername = $state('');
   let unlisten: (() => void) | null = null;
 
-  const TOTAL_STEPS = 5;
+  const TOTAL_STEPS = 6;
 
   onMount(async () => {
     const s = get(settings);
@@ -173,21 +173,49 @@
               <img src="/qorix-animated-icon.svg" alt="Clauge" width="140" height="140" />
             </div>
             <h1 class="ob-title">Welcome to Clauge</h1>
-            <p class="ob-subtitle">The world's first AI-powered developer toolkit — REST, SQL, NoSQL, all in one app.</p>
+            <p class="ob-subtitle">Your developer super-app. Four powerful modes in one place — Agent, REST, SQL, and NoSQL — backed by AI to supercharge your workflow.</p>
             <button class="ob-btn primary" onclick={next}>Get Started</button>
           </div>
         </div>
 
-        <!-- Step 2: Features -->
+        <!-- Step 2: Agent (headline feature) -->
         <div class="step">
           <div class="step-content">
-            <h2 class="ob-title sm">What Clauge Can Do</h2>
+            <div class="step-icon">
+              <svg viewBox="0 0 24 24" width="44" height="44"><path d="M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7v1h1a1 1 0 110 2h-1v1a7 7 0 01-7 7h-1v.27c.6.34 1 .99 1 1.73a2 2 0 11-4 0c0-.74.4-1.39 1-1.73V18h-1a7 7 0 01-7-7v-1H3a1 1 0 110-2h1v-1a7 7 0 017-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 012-2z" stroke="var(--acc)" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="9" cy="13" r="1.5" fill="var(--acc)"/><circle cx="15" cy="13" r="1.5" fill="var(--acc)"/></svg>
+            </div>
+            <h2 class="ob-title sm">Agent Mode</h2>
+            <p class="ob-subtitle">The star of Clauge. Spin up AI-powered sessions for coding, debugging, and automation.</p>
+            <div class="agent-features">
+              <div class="agent-feature-item" style="animation-delay: 0.05s;">
+                <div class="agent-feature-bullet"></div>
+                <span><strong>Sessions</strong> — Each task gets its own isolated workspace with full context</span>
+              </div>
+              <div class="agent-feature-item" style="animation-delay: 0.1s;">
+                <div class="agent-feature-bullet"></div>
+                <span><strong>Purposes</strong> — Code, Debug, Review, Refactor, and more built-in workflows</span>
+              </div>
+              <div class="agent-feature-item" style="animation-delay: 0.15s;">
+                <div class="agent-feature-bullet"></div>
+                <span><strong>Worktree Isolation</strong> — Each session runs in its own git worktree, so nothing conflicts</span>
+              </div>
+            </div>
+            <p class="ob-hint">You can pick a project directory when you start your first session.</p>
+            <button class="ob-btn primary" onclick={next}>Next</button>
+          </div>
+        </div>
+
+        <!-- Step 3: API Tools (informational) -->
+        <div class="step">
+          <div class="step-content">
+            <h2 class="ob-title sm">API & Database Tools</h2>
+            <p class="ob-subtitle">Everything you need for backend development, all built in.</p>
             <div class="feature-cards">
               <div class="feature-card" style="animation-delay: 0.05s;">
                 <div class="feature-icon" style="background: color-mix(in srgb, var(--rest) 12%, transparent);">
                   <svg viewBox="0 0 24 24" width="22" height="22"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" stroke="var(--rest)" fill="none" stroke-width="1.8" stroke-linecap="round"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" stroke="var(--rest)" fill="none" stroke-width="1.8" stroke-linecap="round"/></svg>
                 </div>
-                <h3 class="feature-title">REST API Client</h3>
+                <h3 class="feature-title">REST Client</h3>
                 <p class="feature-desc">Build, test, and organize APIs with collections, environments, and cURL import.</p>
               </div>
               <div class="feature-card" style="animation-delay: 0.1s;">
@@ -205,42 +233,16 @@
                 <p class="feature-desc">MongoDB and Redis support. Browse, query, and edit documents inline.</p>
               </div>
             </div>
+            <p class="ob-hint">No setup required — just start using them from the sidebar.</p>
             <button class="ob-btn primary" onclick={next}>Next</button>
           </div>
         </div>
 
-        <!-- Step 3: AI Capabilities -->
+        <!-- Step 4: AI Setup -->
         <div class="step">
           <div class="step-content">
-            <h2 class="ob-title sm">Built-in AI Assistant</h2>
-            <p class="ob-subtitle">Press <kbd>⌘L</kbd> anytime to open the AI panel. Describe what you need in plain English.</p>
-
-            <div class="ai-grid">
-              <div class="ai-grid-card" style="animation-delay: 0.05s;">
-                <div class="ai-grid-icon" style="background: color-mix(in srgb, var(--rest) 12%, transparent);">
-                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" stroke="var(--rest)" fill="none" stroke-width="1.8" stroke-linecap="round"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" stroke="var(--rest)" fill="none" stroke-width="1.8" stroke-linecap="round"/></svg>
-                </div>
-                <span class="ai-grid-text">Generate API requests from natural language</span>
-              </div>
-              <div class="ai-grid-card" style="animation-delay: 0.1s;">
-                <div class="ai-grid-icon" style="background: color-mix(in srgb, var(--sql) 12%, transparent);">
-                  <svg viewBox="0 0 24 24" width="18" height="18"><ellipse cx="12" cy="5" rx="9" ry="3" stroke="var(--sql)" fill="none" stroke-width="1.8"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" stroke="var(--sql)" fill="none" stroke-width="1.8"/></svg>
-                </div>
-                <span class="ai-grid-text">Write SQL queries from plain English</span>
-              </div>
-              <div class="ai-grid-card" style="animation-delay: 0.15s;">
-                <div class="ai-grid-icon" style="background: color-mix(in srgb, var(--nosql) 12%, transparent);">
-                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="var(--nosql)" fill="none" stroke-width="1.8" stroke-linecap="round"/><path d="M14 2v6h6" stroke="var(--nosql)" fill="none" stroke-width="1.8" stroke-linecap="round"/></svg>
-                </div>
-                <span class="ai-grid-text">Build MongoDB queries and pipelines</span>
-              </div>
-              <div class="ai-grid-card" style="animation-delay: 0.2s;">
-                <div class="ai-grid-icon" style="background: color-mix(in srgb, var(--acc) 12%, transparent);">
-                  <svg viewBox="0 0 24 24" width="18" height="18"><polyline points="16 18 22 12 16 6" stroke="var(--acc)" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="8 6 2 12 8 18" stroke="var(--acc)" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </div>
-                <span class="ai-grid-text">Auto-generate headers, auth, and bodies</span>
-              </div>
-            </div>
+            <h2 class="ob-title sm">AI Setup</h2>
+            <p class="ob-subtitle">Connect an AI provider to power the Agent and inline AI features across all modes.</p>
 
             <div class="ai-setup-section">
               <span class="ai-setup-label">Connect your AI provider</span>
@@ -311,7 +313,7 @@
           </div>
         </div>
 
-        <!-- Step 4: GitHub Sync (OAuth) -->
+        <!-- Step 5: GitHub Sync (OAuth) -->
         <div class="step">
           <div class="step-content">
             <div class="step-icon">
@@ -347,7 +349,7 @@
           </div>
         </div>
 
-        <!-- Step 5: Ready -->
+        <!-- Step 6: Shortcuts -->
         <div class="step">
           <div class="step-content">
             <div class="step-icon check-icon">
@@ -355,11 +357,13 @@
             </div>
             <h2 class="ob-title sm">You're all set!</h2>
             <div class="shortcuts-card">
-              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>Enter</kbd></span><span class="sc-label">Send request / Run query</span></div>
-              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>L</kbd></span><span class="sc-label">AI Assistant</span></div>
-              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>S</kbd></span><span class="sc-label">Save changes</span></div>
-              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>B</kbd></span><span class="sc-label">Toggle sidebar</span></div>
-              <div class="sc-row"><span class="sc-keys"><kbd>⌘</kbd><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span><span class="sc-label">Switch modes</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>&#8984;</kbd><kbd>1</kbd></span><span class="sc-label">Agent</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>&#8984;</kbd><kbd>2</kbd></span><span class="sc-label">REST</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>&#8984;</kbd><kbd>3</kbd></span><span class="sc-label">SQL</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>&#8984;</kbd><kbd>4</kbd></span><span class="sc-label">NoSQL</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>&#8984;</kbd><kbd>L</kbd></span><span class="sc-label">AI Assistant</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>&#8984;</kbd><kbd>&#8679;</kbd><kbd>L</kbd></span><span class="sc-label">Shell</span></div>
+              <div class="sc-row"><span class="sc-keys"><kbd>&#8984;</kbd><kbd>S</kbd></span><span class="sc-label">Save</span></div>
             </div>
             <button class="ob-btn primary" onclick={finish}>Start Building</button>
           </div>
@@ -470,26 +474,20 @@
   .feature-title { font-size: 13px; font-weight: 600; color: var(--t1); }
   .feature-desc { font-size: 11.5px; color: var(--t2); line-height: 1.5; }
 
-  /* AI grid */
-  .ai-grid {
-    display: grid; grid-template-columns: 1fr 1fr;
-    gap: 10px; width: 100%;
+  /* Agent features */
+  .agent-features {
+    display: flex; flex-direction: column; gap: 12px;
+    width: 100%; max-width: 420px; text-align: left;
   }
-  .ai-grid-card {
+  .agent-feature-item {
     display: flex; align-items: flex-start; gap: 10px;
-    padding: 14px; border-radius: 10px;
-    background: rgba(13,13,24,0.7); border: 1px solid var(--b1);
-    text-align: left;
+    font-size: 13px; color: var(--t2); line-height: 1.5;
     opacity: 0; animation: cardIn 0.35s ease forwards;
   }
-  .ai-grid-icon {
-    width: 34px; height: 34px; border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-  .ai-grid-text {
-    font-size: 12px; color: var(--t2); line-height: 1.4;
-    font-family: var(--ui); padding-top: 2px;
+  .agent-feature-item strong { color: var(--t1); font-weight: 600; }
+  .agent-feature-bullet {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--acc); flex-shrink: 0; margin-top: 7px;
   }
 
   /* AI setup */
