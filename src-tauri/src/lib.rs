@@ -103,6 +103,82 @@ pub fn run() {
                 }
             });
 
+            // Migrate existing Clauge data (one-time)
+            tauri::async_runtime::block_on(async {
+                if let Some(home) = dirs::home_dir() {
+                    let clauge_dir = home.join(".clauge");
+                    let sessions_json = clauge_dir.join("sessions.json");
+                    let migrated_key = "clauge_migration_done";
+                    let already_migrated: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+                        .bind(migrated_key).fetch_optional(&pool).await.ok().flatten();
+                    if sessions_json.exists() && already_migrated.is_none() {
+                        // Import sessions
+                        if let Ok(content) = std::fs::read_to_string(&sessions_json) {
+                            if let Ok(store) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if let Some(profiles) = store.get("profiles").and_then(|v| v.as_array()) {
+                                    for p in profiles {
+                                        let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                                        if id.is_empty() { continue; }
+                                        let _ = sqlx::query("INSERT OR IGNORE INTO agent_sessions (id, title, purpose, project_path, project_name, claude_session_id, context_prompt, worktree_path, worktree_branch, skip_permissions, git_name, git_email, created_at, last_used_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+                                            .bind(id)
+                                            .bind(p.get("title").and_then(|v| v.as_str()).unwrap_or(""))
+                                            .bind(p.get("purpose").and_then(|v| v.as_str()).unwrap_or("Custom"))
+                                            .bind(p.get("projectPath").and_then(|v| v.as_str()).unwrap_or(""))
+                                            .bind(p.get("projectName").and_then(|v| v.as_str()).unwrap_or(""))
+                                            .bind(p.get("claudeSessionId").and_then(|v| v.as_str()))
+                                            .bind(p.get("contextPrompt").and_then(|v| v.as_str()).unwrap_or(""))
+                                            .bind(p.get("worktreePath").and_then(|v| v.as_str()))
+                                            .bind(p.get("worktreeBranch").and_then(|v| v.as_str()))
+                                            .bind(if p.get("skipPermissions").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 })
+                                            .bind(p.get("gitName").and_then(|v| v.as_str()))
+                                            .bind(p.get("gitEmail").and_then(|v| v.as_str()))
+                                            .bind(p.get("createdAt").and_then(|v| v.as_str()).unwrap_or(""))
+                                            .bind(p.get("lastUsedAt").and_then(|v| v.as_str()).unwrap_or(""))
+                                            .execute(&pool).await;
+                                    }
+                                }
+                            }
+                        }
+                        // Import context snippets from ~/.clauge/contexts/*.md
+                        let contexts_dir = clauge_dir.join("contexts");
+                        if contexts_dir.exists() {
+                            if let Ok(entries) = std::fs::read_dir(&contexts_dir) {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                                        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                                        let content = std::fs::read_to_string(&path).unwrap_or_default();
+                                        let ctx_id = uuid::Uuid::new_v4().to_string();
+                                        let now = chrono::Utc::now().to_rfc3339();
+                                        let _ = sqlx::query("INSERT OR IGNORE INTO agent_contexts (id, name, content, created_at, updated_at) VALUES (?,?,?,?,?)")
+                                            .bind(&ctx_id).bind(&name).bind(&content).bind(&now).bind(&now)
+                                            .execute(&pool).await;
+                                    }
+                                }
+                            }
+                        }
+                        // Import session key
+                        let key_path = clauge_dir.join("session_key");
+                        if key_path.exists() {
+                            if let Ok(key) = std::fs::read_to_string(&key_path) {
+                                let key = key.trim();
+                                if !key.is_empty() {
+                                    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('agent_session_key', ?)")
+                                        .bind(key).execute(&pool).await;
+                                }
+                            }
+                        }
+                        // Mark migration done
+                        let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, 'true')")
+                            .bind(migrated_key).execute(&pool).await;
+                        // Archive old files
+                        let backup = clauge_dir.join("backup");
+                        let _ = std::fs::create_dir_all(&backup);
+                        let _ = std::fs::rename(&sessions_json, backup.join("sessions.json"));
+                    }
+                }
+            });
+
             // Load saved vibrancy material before managing pool (which moves it)
             let saved_material = tauri::async_runtime::block_on(async {
                 sqlx::query_as::<_, (String,)>(
