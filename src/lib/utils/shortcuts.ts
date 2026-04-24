@@ -76,11 +76,12 @@ function handleKeydown(e: KeyboardEvent) {
     return;
   }
 
-  // Cmd+1/2/3: switch modes (don't intercept if user is typing in input)
+  // Cmd+1/2/3/4: switch modes (don't intercept if user is typing in input)
   if (meta && !isInput) {
-    if (e.key === '1') { mode.set('rest'); e.preventDefault(); }
-    if (e.key === '2') { mode.set('sql'); e.preventDefault(); }
-    if (e.key === '3') { mode.set('nosql'); e.preventDefault(); }
+    if (e.key === '1') { mode.set('agent'); e.preventDefault(); }
+    if (e.key === '2') { mode.set('rest'); e.preventDefault(); }
+    if (e.key === '3') { mode.set('sql'); e.preventDefault(); }
+    if (e.key === '4') { mode.set('nosql'); e.preventDefault(); }
   }
 
   // Cmd+B: toggle nav
@@ -89,11 +90,24 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
   }
 
+  // Cmd+Shift+L: toggle agent shell panel
+  if (meta && e.shiftKey && e.key === 'l') {
+    const currentMode = get(mode);
+    if (currentMode === 'agent') {
+      // Dynamic import to avoid circular dependency
+      import('$lib/stores/agent').then(({ agentShellOpen }) => {
+        agentShellOpen.update(v => !v);
+      });
+    }
+    e.preventDefault();
+  }
+
   // Cmd+L: toggle AI panel
-  if (meta && e.key === 'l') {
+  if (meta && e.key === 'l' && !e.shiftKey) {
+    const currentMode = get(mode);
+    if (currentMode === 'agent') { e.preventDefault(); return; }
     aiPanelOpen.update(v => {
       const next = !v;
-      const currentMode = get(mode);
       aiPanelOpenPerMode.update(m => ({ ...m, [currentMode]: next }));
       return next;
     });
