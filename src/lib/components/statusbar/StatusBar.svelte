@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { githubConnected, syncing, lastSyncedAt } from '$lib/stores/github';
   import { updateAvailable, showWhatsNewModal } from '$lib/utils/updater';
+  import { mode } from '$lib/stores/app';
+  import { agentGitBranchName, agentGitFiles, agentGitAhead, agentGitBehind, agentContextUsage, activeAgentSession } from '$lib/stores/agent';
 
   let appVersion = $state('');
   onMount(async () => {
@@ -25,11 +27,46 @@
     'var(--t3)'
   );
 
+  let contextPct = $derived.by(() => {
+    const session = $activeAgentSession;
+    if (!session) return 0;
+    const usage = $agentContextUsage.get(session.id);
+    return usage ? Math.round(usage.percent) : 0;
+  });
+
+  let contextColor = $derived(
+    contextPct >= 85 ? 'var(--err, #f44)' :
+    contextPct >= 70 ? 'var(--warn, #fa0)' :
+    'var(--ok, #4c8)'
+  );
+
   function openUpdateModal() {
     showWhatsNewModal.set(true);
   }
 </script>
 
+{#if $mode === 'agent'}
+<footer class="statusbar glass-surface">
+  <div class="sl">
+    <div class="si">
+      <svg style="width:10px;height:10px;stroke:var(--t3);fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>
+      <span>{$agentGitBranchName || '—'}</span>
+      {#if $agentGitAhead > 0}<span class="git-ahead">↑{$agentGitAhead}</span>{/if}
+      {#if $agentGitBehind > 0}<span class="git-behind">↓{$agentGitBehind}</span>{/if}
+      {#if $agentGitFiles.length > 0}<span class="git-changes">{$agentGitFiles.length} changed</span>{/if}
+    </div>
+  </div>
+  <div class="sc">
+    <div class="si">
+      <span class="sled" style="background:{contextColor}"></span>
+      <span style="color:{contextColor}">Context: {contextPct}%</span>
+    </div>
+  </div>
+  <div class="sr">
+    {#if appVersion}<div class="si">Qorix v{appVersion}</div>{/if}
+  </div>
+</footer>
+{:else}
 <footer class="statusbar glass-surface">
   <div class="sr">
     <div class="si">
@@ -48,6 +85,7 @@
     {#if appVersion}<div class="si">Qorix v{appVersion}</div>{/if}
   </div>
 </footer>
+{/if}
 
 <style>
   .statusbar {
@@ -74,10 +112,30 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
+  .sl {
+    display: flex;
+    gap: 16px;
+  }
+  .sc {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 16px;
+  }
   .sr {
     margin-left: auto;
     display: flex;
     gap: 16px;
+  }
+  .git-ahead {
+    color: var(--ok, #4c8);
+  }
+  .git-behind {
+    color: var(--warn, #fa0);
+  }
+  .git-changes {
+    color: var(--t2);
   }
   .update-hint {
     cursor: default;
