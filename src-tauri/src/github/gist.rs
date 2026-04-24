@@ -11,6 +11,18 @@ use crate::db::models::{
 
 const GIST_DESCRIPTION: &str = "qorix-data-v1";
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionSync {
+    pub id: String,
+    pub title: String,
+    pub purpose: String,
+    pub context_prompt: String,
+    pub skip_permissions: i32,
+    pub git_name: Option<String>,
+    pub git_email: Option<String>,
+}
+
 /// Track hash of last pushed data to avoid redundant pushes
 static LAST_PUSH_HASH: StdMutex<Option<u64>> = StdMutex::new(None);
 
@@ -37,6 +49,10 @@ pub struct SyncData {
     pub nosql_connections: Vec<NoSqlConnection>,
     #[serde(default)]
     pub sql_scripts: Vec<SqlScript>,
+    #[serde(default)]
+    pub agent_contexts: Vec<crate::commands::agent_models::AgentContext>,
+    #[serde(default)]
+    pub agent_sessions_sync: Vec<AgentSessionSync>,
 }
 
 #[allow(dead_code)]
@@ -113,6 +129,17 @@ async fn export_data(pool: &SqlitePool) -> Result<SyncData, String> {
             .await
             .map_err(|e| format!("Failed to export sql_scripts: {}", e))?;
 
+    let agent_contexts = sqlx::query_as::<_, crate::commands::agent_models::AgentContext>(
+        "SELECT * FROM agent_contexts ORDER BY name"
+    ).fetch_all(pool).await.unwrap_or_default();
+
+    let agent_sessions_sync: Vec<AgentSessionSync> = sqlx::query_as::<_, (String, String, String, String, i32, Option<String>, Option<String>)>(
+        "SELECT id, title, purpose, context_prompt, skip_permissions, git_name, git_email FROM agent_sessions"
+    ).fetch_all(pool).await.unwrap_or_default().into_iter().map(|r| AgentSessionSync {
+        id: r.0, title: r.1, purpose: r.2, context_prompt: r.3,
+        skip_permissions: r.4, git_name: r.5, git_email: r.6,
+    }).collect();
+
     let now = chrono::Utc::now().to_rfc3339();
 
     Ok(SyncData {
@@ -127,6 +154,8 @@ async fn export_data(pool: &SqlitePool) -> Result<SyncData, String> {
         sql_connections,
         nosql_connections,
         sql_scripts,
+        agent_contexts,
+        agent_sessions_sync,
     })
 }
 
@@ -205,7 +234,8 @@ pub async fn gist_sync_push(pool: State<'_, SqlitePool>) -> Result<String, Strin
     // Never push empty data — protects cloud backup from being wiped
     // Only check user-created data (not environments, which may be empty on fresh install)
     if data.collections.is_empty() && data.requests.is_empty()
-        && data.sql_connections.is_empty() && data.nosql_connections.is_empty() && data.sql_scripts.is_empty() {
+        && data.sql_connections.is_empty() && data.nosql_connections.is_empty() && data.sql_scripts.is_empty()
+        && data.agent_contexts.is_empty() {
         log::warn!("[Sync Push] Skipped — no user data, not overwriting cloud backup");
         return Ok("Skipped — nothing to push".to_string());
     }
@@ -581,6 +611,22 @@ async fn import_data(pool: &SqlitePool, data: &SyncData) -> Result<(), String> {
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to insert sql_script: {}", e))?;
+    }
+
+    // Import agent contexts
+    sqlx::query("DELETE FROM agent_contexts").execute(&mut *tx).await.ok();
+    for ctx in &data.agent_contexts {
+        sqlx::query("INSERT OR REPLACE INTO agent_contexts (id, name, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&ctx.id).bind(&ctx.name).bind(&ctx.content).bind(&ctx.created_at).bind(&ctx.updated_at)
+            .execute(&mut *tx).await.ok();
+    }
+
+    // Import agent sessions (INSERT OR IGNORE — don't overwrite machine-specific fields)
+    for s in &data.agent_sessions_sync {
+        sqlx::query("INSERT OR IGNORE INTO agent_sessions (id, title, purpose, project_path, project_name, context_prompt, skip_permissions, git_name, git_email, created_at, last_used_at) VALUES (?, ?, ?, '', '', ?, ?, ?, ?, datetime('now'), datetime('now'))")
+            .bind(&s.id).bind(&s.title).bind(&s.purpose).bind(&s.context_prompt)
+            .bind(s.skip_permissions).bind(&s.git_name).bind(&s.git_email)
+            .execute(&mut *tx).await.ok();
     }
 
     tx.commit().await.map_err(|e| format!("Failed to commit transaction: {}", e))?;
