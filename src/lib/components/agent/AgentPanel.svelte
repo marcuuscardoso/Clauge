@@ -468,7 +468,15 @@
         }
       };
 
-      const termId = await agentSpawnTerminal(session.id, spawnPath, onOutput);
+      const termId = await agentSpawnTerminal({
+        sessionId: session.claudeSessionId || undefined,
+        projectPath: spawnPath,
+        contextPrompt: session.contextPrompt || undefined,
+        skipPermissions: session.skipPermissions === 1 || undefined,
+        gitName: session.gitName || undefined,
+        gitEmail: session.gitEmail || undefined,
+        onOutput,
+      });
       agentTerminalIds.update(m => { m.set(session.id, termId); return new Map(m); });
 
       // Fit + resize PTY
