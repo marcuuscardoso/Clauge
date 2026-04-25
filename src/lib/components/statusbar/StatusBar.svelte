@@ -3,7 +3,7 @@
   import { githubConnected, syncing, lastSyncedAt } from '$lib/stores/github';
   import { updateAvailable, showWhatsNewModal } from '$lib/utils/updater';
   import { mode } from '$lib/stores/app';
-  import { agentGitBranchName, agentGitFiles, agentGitAhead, agentGitBehind, agentContextUsage, activeAgentSession, agentUsageLimits } from '$lib/stores/agent';
+  import { agentGitBranchName, agentGitFiles, agentGitAhead, agentGitBehind, activeAgentSession, agentUsageLimits, agentShellOpen } from '$lib/stores/agent';
   import AgentGitPanel from '$lib/components/agent/AgentGitPanel.svelte';
 
   let gitPanelOpen = $state(false);
@@ -28,19 +28,6 @@
     $syncing ? 'var(--warn)' :
     $githubConnected ? 'var(--ok)' :
     'var(--t3)'
-  );
-
-  let contextPct = $derived.by(() => {
-    const session = $activeAgentSession;
-    if (!session) return 0;
-    const usage = $agentContextUsage.get(session.id);
-    return usage ? Math.round(usage.percent) : 0;
-  });
-
-  let contextColor = $derived(
-    contextPct >= 85 ? 'var(--err, #f44)' :
-    contextPct >= 70 ? 'var(--warn, #fa0)' :
-    'var(--ok, #4c8)'
   );
 
   interface UsageChip { label: string; pct: number; color: string; }
@@ -93,20 +80,20 @@
   </div>
   <AgentGitPanel bind:open={gitPanelOpen} />
   <div class="sc">
-    <div class="si">
-      <span class="sled" style="background:{contextColor}"></span>
-      <span style="color:{contextColor}">Context: {contextPct}%</span>
-    </div>
-  </div>
-  <div class="sr">
     {#each usageChips as chip}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="si usage-chip" style="color:{chip.color}" onclick={showUsageDashboard}>
         <span class="sled" style="background:{chip.color}"></span>
         <span>{chip.label} {chip.pct}%</span>
       </div>
     {/each}
+  </div>
+  <div class="sr">
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="si shell-toggle" onclick={() => agentShellOpen.update(v => !v)}>
+      <svg style="width:10px;height:10px;stroke:{$agentShellOpen ? 'var(--acc)' : 'var(--t3)'};fill:none;stroke-width:1.7;stroke-linecap:round" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      <span style="color:{$agentShellOpen ? 'var(--acc)' : ''}">Shell</span>
+    </div>
     {#if appVersion}<div class="si">Clauge v{appVersion}</div>{/if}
   </div>
 </footer>
@@ -221,6 +208,15 @@
     transition: background 0.1s;
   }
   .usage-chip:hover {
+    background: rgba(255,255,255,0.06);
+  }
+  .shell-toggle {
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: background 0.1s;
+  }
+  .shell-toggle:hover {
     background: rgba(255,255,255,0.06);
   }
 </style>

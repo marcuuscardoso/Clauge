@@ -9,6 +9,7 @@
   import EnvManagerModal from '$lib/components/env/EnvManagerModal.svelte';
   import SettingsModal from '$lib/components/settings/SettingsModal.svelte';
   import GitHubConnect from '$lib/components/github/GitHubConnect.svelte';
+  import { loadAgentSessions, loadAgentContexts } from '$lib/stores/agent';
   import NewSessionModal from '$lib/components/agent/NewSessionModal.svelte';
   import EditSessionModal from '$lib/components/agent/EditSessionModal.svelte';
   import favicon from '$lib/assets/favicon.svg';
@@ -168,6 +169,8 @@
       loadSqlConnections(),
       loadSqlScripts(),
       loadNoSqlConnections(),
+      loadAgentSessions(),
+      loadAgentContexts(),
     ]);
 
     applyAppearanceOnStartup();
