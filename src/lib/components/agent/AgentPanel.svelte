@@ -35,6 +35,7 @@
   import { refreshAgentGitStatus, loadAgentSessions } from '$lib/stores/agent';
   import { getTerminalTheme } from '$lib/utils/theme';
   import { appearance } from '$lib/stores/settings';
+  import { getPurposePrompt } from '$lib/prompts/agent';
 
   let terminalEl: HTMLDivElement;
   let shellEl: HTMLDivElement;
@@ -475,10 +476,15 @@
         }
       };
 
+      // Flatten prompt to single line for shell compatibility (matches original Clauge)
+      // Use frontend purpose prompt for fixed purposes, fall back to stored prompt for Custom
+      const rawPrompt = getPurposePrompt(session.purpose) || session.contextPrompt || '';
+      const purposePrompt = rawPrompt.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+
       const termId = await agentSpawnTerminal({
         sessionId: session.claudeSessionId || undefined,
         projectPath: spawnPath,
-        contextPrompt: session.contextPrompt || undefined,
+        contextPrompt: purposePrompt || undefined,
         skipPermissions: session.skipPermissions === 1 || undefined,
         gitName: session.gitName || undefined,
         gitEmail: session.gitEmail || undefined,
