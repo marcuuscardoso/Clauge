@@ -1,6 +1,7 @@
 use crate::commands::agent_models::{AgentSession, AgentContext};
 use sqlx::SqlitePool;
-use tauri::State;
+use std::path::PathBuf;
+use tauri::{Manager, State};
 
 fn get_purpose_prompt(purpose: &str) -> String {
     match purpose {
@@ -119,4 +120,108 @@ pub async fn agent_attach_context(pool: State<'_, SqlitePool>, session_id: Strin
 pub async fn agent_detach_context(pool: State<'_, SqlitePool>, session_id: String, context_id: String) -> Result<(), String> {
     sqlx::query("DELETE FROM agent_session_contexts WHERE session_id = ? AND context_id = ?").bind(&session_id).bind(&context_id).execute(pool.inner()).await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn agent_inject_contexts(pool: State<'_, SqlitePool>, project_path: String, context_names: Vec<String>) -> Result<(), String> {
+    if context_names.is_empty() { return Ok(()); }
+
+    // Fetch context content from DB by name
+    let mut combined = String::new();
+    for name in &context_names {
+        let row: Option<(String,)> = sqlx::query_as("SELECT content FROM agent_contexts WHERE name = ?")
+            .bind(name).fetch_optional(pool.inner()).await.map_err(|e| e.to_string())?;
+        if let Some((content,)) = row {
+            if !combined.is_empty() { combined.push_str("\n\n---\n\n"); }
+            combined.push_str(&format!("## {}\n\n{}", name, content));
+        }
+    }
+    if combined.is_empty() { return Ok(()); }
+
+    let claude_md_path = PathBuf::from(&project_path).join("CLAUDE.md");
+    let marker_start = "<!-- CLAUGE-CONTEXT-START -->";
+    let marker_end = "<!-- CLAUGE-CONTEXT-END -->";
+
+    let existing_content = if claude_md_path.exists() {
+        let raw = std::fs::read_to_string(&claude_md_path).map_err(|e| e.to_string())?;
+        if let (Some(start), Some(_end)) = (raw.find(marker_start), raw.find(marker_end)) {
+            raw[..start].trim_end().to_string()
+        } else {
+            raw
+        }
+    } else {
+        String::new()
+    };
+
+    // Filter out snippets already present in file
+    let mut filtered = String::new();
+    for name in &context_names {
+        let row: Option<(String,)> = sqlx::query_as("SELECT content FROM agent_contexts WHERE name = ?")
+            .bind(name).fetch_optional(pool.inner()).await.map_err(|e| e.to_string())?;
+        if let Some((content,)) = row {
+            if !existing_content.contains(content.trim()) {
+                if !filtered.is_empty() { filtered.push_str("\n\n---\n\n"); }
+                filtered.push_str(&format!("## {}\n\n{}", name, content));
+            }
+        }
+    }
+    if filtered.is_empty() { return Ok(()); }
+
+    let injected = format!("\n\n{}\n{}\n{}\n", marker_start, filtered, marker_end);
+
+    if !existing_content.is_empty() {
+        std::fs::write(&claude_md_path, format!("{}{}", existing_content.trim_end(), injected)).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::write(&claude_md_path, filtered).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn agent_remove_injected_contexts(project_path: String) -> Result<(), String> {
+    let claude_md_path = PathBuf::from(&project_path).join("CLAUDE.md");
+    if !claude_md_path.exists() { return Ok(()); }
+
+    let content = std::fs::read_to_string(&claude_md_path).map_err(|e| e.to_string())?;
+    let marker_start = "<!-- CLAUGE-CONTEXT-START -->";
+    let marker_end = "<!-- CLAUGE-CONTEXT-END -->";
+
+    if let (Some(start), Some(end)) = (content.find(marker_start), content.find(marker_end)) {
+        let cleaned = format!("{}{}", &content[..start].trim_end(), &content[end + marker_end.len()..]);
+        if cleaned.trim().is_empty() {
+            let _ = std::fs::remove_file(&claude_md_path);
+        } else {
+            std::fs::write(&claude_md_path, cleaned.trim_end().to_string() + "\n").map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn agent_update_tray_title(app_handle: tauri::AppHandle, title: String) -> Result<(), String> {
+    if let Some(tray) = app_handle.tray_by_id(&tauri::tray::TrayIconId::new("main-tray")) {
+        tray.set_title(Some(&title)).map_err(|e| format!("Tray error: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn agent_get_claude_plan() -> Result<String, String> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+        .map_err(|e| format!("Keychain error: {}", e))?;
+    if !output.status.success() {
+        return Ok(String::new());
+    }
+    let json_str = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_str.trim()).map_err(|e| e.to_string())?;
+    Ok(parsed
+        .get("claudeAiOauth")
+        .and_then(|o| o.get("subscriptionType").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string())
 }

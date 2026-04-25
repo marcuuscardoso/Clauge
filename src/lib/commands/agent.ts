@@ -42,6 +42,8 @@ export const agentDeleteContext = (id: string) => invoke<void>('agent_delete_con
 export const agentGetSessionContexts = (sessionId: string) => invoke<AgentContext[]>('agent_get_session_contexts', { sessionId });
 export const agentAttachContext = (sessionId: string, contextId: string) => invoke<void>('agent_attach_context', { sessionId, contextId });
 export const agentDetachContext = (sessionId: string, contextId: string) => invoke<void>('agent_detach_context', { sessionId, contextId });
+export const agentInjectContexts = (projectPath: string, contextNames: string[]) => invoke<void>('agent_inject_contexts', { projectPath, contextNames });
+export const agentRemoveInjectedContexts = (projectPath: string) => invoke<void>('agent_remove_injected_contexts', { projectPath });
 
 // Terminal
 export const agentSpawnTerminal = (params: {
@@ -92,3 +94,7 @@ export const agentFetchUsageLimits = (sessionKey: string) => invoke<any>('agent_
 export const agentDiscoverSessions = (projectPath: string) => invoke<DiscoveredSession[]>('agent_discover_sessions', { projectPath });
 export const agentGetSessionTokens = (projectPath: string, sessionId?: string) => invoke<TokenUsage>('agent_get_session_tokens', { projectPath, sessionId });
 export const agentGetSessionContextUsage = (projectPath: string, sessionId: string) => invoke<ContextUsage>('agent_get_session_context_usage', { projectPath, sessionId });
+
+// System
+export const agentUpdateTrayTitle = (title: string) => invoke<void>('agent_update_tray_title', { title });
+export const agentGetClaudePlan = () => invoke<string>('agent_get_claude_plan');

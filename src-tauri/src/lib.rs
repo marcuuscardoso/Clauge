@@ -319,6 +319,8 @@ pub fn run() {
             commands::agent::agent_get_session_contexts,
             commands::agent::agent_attach_context,
             commands::agent::agent_detach_context,
+            commands::agent::agent_inject_contexts,
+            commands::agent::agent_remove_injected_contexts,
             commands::agent_terminal::agent_spawn_terminal,
             commands::agent_terminal::agent_spawn_shell,
             commands::agent_terminal::agent_write_to_terminal,
@@ -351,7 +353,15 @@ pub fn run() {
             commands::agent_usage::agent_discover_sessions,
             commands::agent_usage::agent_get_session_tokens,
             commands::agent_usage::agent_get_session_context_usage,
+            commands::agent::agent_update_tray_title,
+            commands::agent::agent_get_claude_plan,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window.hide().ok();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

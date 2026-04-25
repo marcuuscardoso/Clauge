@@ -5,6 +5,7 @@
   import { FitAddon } from '@xterm/addon-fit';
   import '@xterm/xterm/css/xterm.css';
   import { Channel } from '@tauri-apps/api/core';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
     activeAgentSession,
     agentTerminalMap,
@@ -31,8 +32,13 @@
     agentCreateWorktree,
     agentUpdateWorktree,
     agentListSessions,
+    agentGetSessionContexts,
+    agentInjectContexts,
+    agentKillTerminal,
+    agentRemoveWorktree,
+    agentDeleteSession,
   } from '$lib/commands/agent';
-  import { refreshAgentGitStatus, loadAgentSessions } from '$lib/stores/agent';
+  import { refreshAgentGitStatus, refreshAgentContextUsage, loadAgentSessions } from '$lib/stores/agent';
   import { getTerminalTheme } from '$lib/utils/theme';
   import { appearance } from '$lib/stores/settings';
   import { getPurposePrompt } from '$lib/prompts/agent';
@@ -53,11 +59,18 @@
   // Track current session to detect changes
   let currentSessionId: string | null = null;
 
+  // Context usage polling interval
+  let contextUsageInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Suppress auto-switch on exit (set by reset/close actions)
+  let _suppressExit = false;
+
   // --- Notification system for action-required prompts ---
   let notifyOutputBuffer = '';
   let notifyLastTime = 0;
   let notifyBufferTimer: ReturnType<typeof setTimeout> | null = null;
   let notifySoundInterval: ReturnType<typeof setInterval> | null = null;
+  let unlistenFileDrop: (() => void) | null = null;
 
   const actionPatterns = [
     /Do you want to proceed/i,
@@ -337,6 +350,25 @@
     }
   }
 
+  function stopContextUsagePolling() {
+    if (contextUsageInterval) {
+      clearInterval(contextUsageInterval);
+      contextUsageInterval = null;
+    }
+  }
+
+  function startContextUsagePolling(session: any) {
+    stopContextUsagePolling();
+    const projectPath = session.worktreePath || session.projectPath;
+    contextUsageInterval = setInterval(() => {
+      const s = get(activeAgentSession);
+      if (!s || s.id !== session.id) { stopContextUsagePolling(); return; }
+      if (s.claudeSessionId) {
+        refreshAgentContextUsage(s.id, projectPath, s.claudeSessionId);
+      }
+    }, 5000);
+  }
+
   async function selectSession(session: any) {
     if (!session || !terminalEl) return;
     currentSessionId = session.id;
@@ -366,8 +398,14 @@
 
       let spawnPath = session.worktreePath || session.projectPath;
 
-      // TODO: inject_session_context backend command needed — when session is selected,
-      // call agentGetSessionContexts(session.id) and inject contexts into CLAUDE.md
+      // Inject attached contexts into CLAUDE.md before spawning
+      try {
+        const sessionContexts = await agentGetSessionContexts(session.id);
+        if (sessionContexts.length > 0) {
+          const contextNames = sessionContexts.map((c: any) => c.name);
+          await agentInjectContexts(spawnPath, contextNames);
+        }
+      } catch (_) {}
 
       // Auto-create worktree for new sessions in git repos
       if (!session.worktreePath && !session.claudeSessionId) {
@@ -439,6 +477,20 @@
               }).catch(() => {});
             }
             agentSessionActivity.update(m => { m.set(sessionId, 'done'); return new Map(m); });
+
+            // Auto-switch to next running session (Feature 3)
+            if (!_suppressExit) {
+              const currentActive = get(activeAgentSession);
+              if (currentActive?.id === sessionId) {
+                const activity = get(agentSessionActivity);
+                const sessions = get(agentSessions);
+                const nextRunning = sessions.find(s => s.id !== sessionId && activity.get(s.id) === 'running');
+                if (nextRunning) {
+                  activeAgentSession.set(nextRunning);
+                }
+              }
+            }
+            _suppressExit = false;
           }
         } catch (_) {}
 
@@ -491,6 +543,9 @@
         onOutput,
       });
       agentTerminalIds.update(m => { m.set(session.id, termId); return new Map(m); });
+
+      // Start context usage polling (Feature 2)
+      startContextUsagePolling(session);
 
       // Fit + resize PTY
       requestAnimationFrame(() => {
@@ -598,6 +653,118 @@
     }
   });
 
+  // Event handler for reset-session (Feature 4)
+  function handleResetSession(e: Event) {
+    const detail = (e as CustomEvent).detail;
+    if (!detail?.session) return;
+    const session = detail.session;
+    _suppressExit = true;
+
+    // Kill terminal
+    const tIds = get(agentTerminalIds);
+    const termId = tIds.get(session.id);
+    if (termId) agentKillTerminal(termId).catch(() => {});
+
+    // Kill shell
+    const sIds = get(agentShellIds);
+    const shellId = sIds.get(session.id);
+    if (shellId) agentKillTerminal(shellId).catch(() => {});
+
+    // Clear session ID
+    agentUpdateSessionId(session.id, '').catch(() => {});
+    session.claudeSessionId = null;
+
+    // Remove from maps
+    agentTerminalIds.update(m => { m.delete(session.id); return new Map(m); });
+    agentShellIds.update(m => { m.delete(session.id); return new Map(m); });
+
+    // Remove terminal entry so selectSession creates fresh one
+    const tMap = get(agentTerminalMap);
+    const entry = tMap.get(session.id);
+    if (entry) {
+      entry.container.remove();
+      entry.term.dispose();
+      agentTerminalMap.update(m => { m.delete(session.id); return new Map(m); });
+    }
+
+    // Remove shell entry
+    const sMap = get(agentShellMap);
+    const sEntry = sMap.get(session.id);
+    if (sEntry) {
+      sEntry.container.remove();
+      sEntry.term.dispose();
+      agentShellMap.update(m => { m.delete(session.id); return new Map(m); });
+    }
+
+    // Reset current session ID so selectSession processes it
+    currentSessionId = null;
+    activeTermEntry = null;
+    activeShellEntry = null;
+
+    loadAgentSessions().then(() => {
+      selectSession(session);
+    });
+  }
+
+  // Event handler for delete-session (Feature 5)
+  async function handleDeleteSession(e: Event) {
+    const detail = (e as CustomEvent).detail;
+    if (!detail?.session) return;
+    const session = detail.session;
+
+    _suppressExit = true;
+
+    // Kill terminal
+    const tIds = get(agentTerminalIds);
+    const termId = tIds.get(session.id);
+    if (termId) await agentKillTerminal(termId).catch(() => {});
+
+    // Kill shell
+    const sIds = get(agentShellIds);
+    const shellId = sIds.get(session.id);
+    if (shellId) await agentKillTerminal(shellId).catch(() => {});
+
+    // Cleanup terminal entry
+    const tMap = get(agentTerminalMap);
+    const entry = tMap.get(session.id);
+    if (entry) {
+      entry.container.remove();
+      entry.term.dispose();
+      agentTerminalMap.update(m => { m.delete(session.id); return new Map(m); });
+    }
+
+    // Cleanup shell entry
+    const sMap = get(agentShellMap);
+    const sEntry = sMap.get(session.id);
+    if (sEntry) {
+      sEntry.container.remove();
+      sEntry.term.dispose();
+      agentShellMap.update(m => { m.delete(session.id); return new Map(m); });
+    }
+
+    agentTerminalIds.update(m => { m.delete(session.id); return new Map(m); });
+    agentShellIds.update(m => { m.delete(session.id); return new Map(m); });
+
+    // Remove worktree if exists
+    if (session.worktreePath) {
+      await agentRemoveWorktree(session.projectPath, session.worktreePath).catch(() => {});
+    }
+
+    // Delete from DB
+    await agentDeleteSession(session.id).catch(() => {});
+
+    // If this was the active session, clear it
+    const currentActive = get(activeAgentSession);
+    if (currentActive?.id === session.id) {
+      currentSessionId = null;
+      activeTermEntry = null;
+      activeShellEntry = null;
+      activeAgentSession.set(null);
+    }
+
+    await loadAgentSessions();
+  }
+
   onMount(async () => {
     // Load notification preferences from settings
     try {
@@ -610,14 +777,43 @@
       agentSoundEnabled.set(sound === 'true');
       agentDockBounceEnabled.set(dock === 'true');
     } catch (_) {}
+
+    // Listen for reset-session and delete-session events
+    window.addEventListener('agent:reset-session', handleResetSession);
+    window.addEventListener('agent:delete-session', handleDeleteSession);
+
+    // File drag-and-drop: write dropped file paths into the active terminal
+    try {
+      const win = getCurrentWindow();
+      win.onDragDropEvent((event) => {
+        if (event.payload.type === 'drop') {
+          const paths = event.payload.paths;
+          if (!paths?.length) return;
+          const session = get(activeAgentSession);
+          if (!session) return;
+          const tIds = get(agentTerminalIds);
+          const termId = tIds.get(session.id);
+          if (termId) {
+            const pathStr = paths.map((p: string) => p.includes(' ') ? `"${p}"` : p).join(' ');
+            agentWriteToTerminal(termId, pathStr + ' ');
+          }
+        }
+      }).then((unlisten) => {
+        unlistenFileDrop = unlisten;
+      });
+    } catch (_) {}
   });
 
   onDestroy(() => {
     unsubSession();
     unsubShell();
     unsubAppearance();
+    stopContextUsagePolling();
     if (notifyBufferTimer) clearTimeout(notifyBufferTimer);
     if (notifySoundInterval) clearInterval(notifySoundInterval);
+    window.removeEventListener('agent:reset-session', handleResetSession);
+    window.removeEventListener('agent:delete-session', handleDeleteSession);
+    if (unlistenFileDrop) unlistenFileDrop();
   });
 </script>
 

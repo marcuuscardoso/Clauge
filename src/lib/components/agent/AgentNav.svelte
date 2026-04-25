@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { agentSessions, activeAgentSession, agentContextUsage, agentSessionActivity } from '$lib/stores/agent';
+  import { agentSessions, activeAgentSession, agentContextUsage, agentSessionActivity, agentClaudePlan } from '$lib/stores/agent';
   import { mode } from '$lib/stores/app';
   import { showContextMenu } from '$lib/components/shared/contextmenu';
   import { showToast } from '$lib/components/shared/toast';
@@ -202,6 +202,11 @@
         {/each}
       {/if}
     {/each}
+  {/if}
+  {#if $agentClaudePlan}
+    <div class="plan-badge-row">
+      <span class="plan-badge">{$agentClaudePlan}</span>
+    </div>
   {/if}
 </div>
 
@@ -441,4 +446,21 @@
   .confirm-btn:hover { background: var(--c); color: var(--t1); }
   .confirm-btn.danger { background: var(--err); color: #fff; border-color: transparent; }
   .confirm-btn.danger:hover { opacity: 0.9; }
+
+  /* Claude plan badge */
+  .plan-badge-row {
+    padding: 8px 10px 4px;
+    margin-top: auto;
+  }
+  .plan-badge {
+    font-size: 9px;
+    font-family: var(--ui);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--acc, #6366f1);
+    background: rgba(99, 102, 241, 0.10);
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
 </style>

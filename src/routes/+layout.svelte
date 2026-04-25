@@ -27,7 +27,7 @@
   import { setConnected, setLastSynced, hasSyncedOnce, markSynced, showSyncRestorePrompt } from '$lib/stores/github';
   import { githubGetStatus, gistCheckExists, gistSyncPush, gistSyncPull } from '$lib/commands/github';
   import { activeModal, aiPanelOpen, mode } from '$lib/stores/app';
-  import { agentSessionKey, loadAgentUsageLimits } from '$lib/stores/agent';
+  import { agentSessionKey, loadAgentUsageLimits, loadAgentClaudePlan } from '$lib/stores/agent';
   import { getSetting } from '$lib/commands/settings';
   import AIPanel from '$lib/components/ai/AIPanel.svelte';
   import { tabs, addTab, activeTabId } from '$lib/stores/tabs';
@@ -247,6 +247,9 @@
     } catch {
       // Updater not available in dev mode
     }
+
+    // Load Claude plan from keychain
+    loadAgentClaudePlan();
 
     // Load agent session key and start usage limits polling
     try {

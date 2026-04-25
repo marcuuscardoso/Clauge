@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import type { AgentSession, AgentContext, ContextUsage, GitFileChange } from '$lib/types/agent';
-import { agentListSessions, agentListContexts, agentGitStatus, agentGitBranch, agentGitAheadBehind, agentGetSessionContextUsage, agentFetchUsageLimits } from '$lib/commands/agent';
+import { agentListSessions, agentListContexts, agentGitStatus, agentGitBranch, agentGitAheadBehind, agentGetSessionContextUsage, agentFetchUsageLimits, agentUpdateTrayTitle, agentGetClaudePlan } from '$lib/commands/agent';
 
 // Sessions
 export const agentSessions = writable<AgentSession[]>([]);
@@ -37,12 +37,37 @@ export const agentDockBounceEnabled = writable<boolean>(false);
 export const agentUsageLimits = writable<any>(null);
 export const agentSessionKey = writable<string>('');
 
+// Claude subscription plan
+export const agentClaudePlan = writable<string>('');
+
+export async function loadAgentClaudePlan() {
+  try {
+    const plan = await agentGetClaudePlan();
+    agentClaudePlan.set(plan);
+  } catch { /* ignore */ }
+}
+
 export async function loadAgentUsageLimits() {
   const key = get(agentSessionKey);
   if (!key) return;
   try {
     const limits = await agentFetchUsageLimits(key);
     agentUsageLimits.set(limits);
+    // Update tray title with usage stats
+    try {
+      const standard = limits?.standard;
+      const extended = limits?.extended;
+      const parts: string[] = [];
+      if (standard && typeof standard.percentUsed === 'number') {
+        parts.push(`S:${Math.round(standard.percentUsed)}%`);
+      }
+      if (extended && typeof extended.percentUsed === 'number') {
+        parts.push(`W:${Math.round(extended.percentUsed)}%`);
+      }
+      if (parts.length > 0) {
+        await agentUpdateTrayTitle(parts.join(' '));
+      }
+    } catch { /* tray update best-effort */ }
   } catch { /* ignore */ }
 }
 
