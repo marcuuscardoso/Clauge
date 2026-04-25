@@ -123,20 +123,19 @@ pub async fn agent_detach_context(pool: State<'_, SqlitePool>, session_id: Strin
 }
 
 #[tauri::command]
-pub async fn agent_inject_contexts(pool: State<'_, SqlitePool>, project_path: String, context_names: Vec<String>) -> Result<(), String> {
-    if context_names.is_empty() { return Ok(()); }
+pub async fn agent_inject_contexts(pool: State<'_, SqlitePool>, project_path: String, context_ids: Vec<String>) -> Result<(), String> {
+    if context_ids.is_empty() { return Ok(()); }
 
-    // Fetch context content from DB by name
-    let mut combined = String::new();
-    for name in &context_names {
-        let row: Option<(String,)> = sqlx::query_as("SELECT content FROM agent_contexts WHERE name = ?")
-            .bind(name).fetch_optional(pool.inner()).await.map_err(|e| e.to_string())?;
-        if let Some((content,)) = row {
-            if !combined.is_empty() { combined.push_str("\n\n---\n\n"); }
-            combined.push_str(&format!("## {}\n\n{}", name, content));
+    // Fetch context content from DB by ID
+    let mut contexts: Vec<(String, String)> = Vec::new();
+    for id in &context_ids {
+        let row: Option<(String, String)> = sqlx::query_as("SELECT name, content FROM agent_contexts WHERE id = ?")
+            .bind(id).fetch_optional(pool.inner()).await.map_err(|e| e.to_string())?;
+        if let Some(ctx) = row {
+            contexts.push(ctx);
         }
     }
-    if combined.is_empty() { return Ok(()); }
+    if contexts.is_empty() { return Ok(()); }
 
     let claude_md_path = PathBuf::from(&project_path).join("CLAUDE.md");
     let marker_start = "<!-- CLAUGE-CONTEXT-START -->";
@@ -153,16 +152,12 @@ pub async fn agent_inject_contexts(pool: State<'_, SqlitePool>, project_path: St
         String::new()
     };
 
-    // Filter out snippets already present in file
+    // Filter out snippets whose content already exists in the file
     let mut filtered = String::new();
-    for name in &context_names {
-        let row: Option<(String,)> = sqlx::query_as("SELECT content FROM agent_contexts WHERE name = ?")
-            .bind(name).fetch_optional(pool.inner()).await.map_err(|e| e.to_string())?;
-        if let Some((content,)) = row {
-            if !existing_content.contains(content.trim()) {
-                if !filtered.is_empty() { filtered.push_str("\n\n---\n\n"); }
-                filtered.push_str(&format!("## {}\n\n{}", name, content));
-            }
+    for (name, content) in &contexts {
+        if !existing_content.contains(content.trim()) {
+            if !filtered.is_empty() { filtered.push_str("\n\n---\n\n"); }
+            filtered.push_str(&format!("## {}\n\n{}", name, content));
         }
     }
     if filtered.is_empty() { return Ok(()); }

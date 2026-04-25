@@ -42,7 +42,7 @@ export const agentDeleteContext = (id: string) => invoke<void>('agent_delete_con
 export const agentGetSessionContexts = (sessionId: string) => invoke<AgentContext[]>('agent_get_session_contexts', { sessionId });
 export const agentAttachContext = (sessionId: string, contextId: string) => invoke<void>('agent_attach_context', { sessionId, contextId });
 export const agentDetachContext = (sessionId: string, contextId: string) => invoke<void>('agent_detach_context', { sessionId, contextId });
-export const agentInjectContexts = (projectPath: string, contextNames: string[]) => invoke<void>('agent_inject_contexts', { projectPath, contextNames });
+export const agentInjectContexts = (projectPath: string, contextIds: string[]) => invoke<void>('agent_inject_contexts', { projectPath, contextIds });
 export const agentRemoveInjectedContexts = (projectPath: string) => invoke<void>('agent_remove_injected_contexts', { projectPath });
 
 // Terminal

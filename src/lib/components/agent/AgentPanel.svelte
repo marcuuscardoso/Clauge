@@ -402,8 +402,8 @@
       try {
         const sessionContexts = await agentGetSessionContexts(session.id);
         if (sessionContexts.length > 0) {
-          const contextNames = sessionContexts.map((c: any) => c.name);
-          await agentInjectContexts(spawnPath, contextNames);
+          const contextIds = sessionContexts.map((c: any) => c.id);
+          await agentInjectContexts(spawnPath, contextIds);
         }
       } catch (_) {}
 
