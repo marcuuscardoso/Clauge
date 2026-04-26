@@ -59,6 +59,9 @@
   // Track current session to detect changes
   let currentSessionId: string | null = null;
 
+  // Loading state for terminal spawn
+  let spawning = $state(false);
+
   // Context usage polling interval
   let contextUsageInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -378,9 +381,20 @@
     const tIds = get(agentTerminalIds);
 
     if (entry && tIds.get(session.id)) {
+      // Re-attach container if orphaned (after mode switch destroys/re-creates DOM)
+      if (entry.container.parentElement !== terminalEl) {
+        terminalEl.appendChild(entry.container);
+      }
       showTermEntry(entry);
       if (session.claudeSessionId) startContextUsagePolling(session);
-      if (get(agentShellOpen)) spawnShellForSession(session);
+      if (get(agentShellOpen)) {
+        const sMap = get(agentShellMap);
+        const sEntry = sMap.get(session.id);
+        if (sEntry && shellEl && sEntry.container.parentElement !== shellEl) {
+          shellEl.appendChild(sEntry.container);
+        }
+        spawnShellForSession(session);
+      }
       refreshAgentGitStatus();
       return;
     }
@@ -442,6 +456,7 @@
       const onOutput = new Channel();
 
       onOutput.onmessage = (payload: any) => {
+        if (spawning) spawning = false;
         // Write data to terminal
         if (entry!.term) {
           try {
@@ -466,7 +481,7 @@
             .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
             .replace(/\x1b\][^\x07]*\x07/g, '');
 
-          if (/Resume this session with:/.test(clean) || /claude --resume [a-f0-9-]+/.test(clean)) {
+          if (/Resume this session with:/i.test(clean) || /claude --resume [a-f0-9-]{8,}/.test(clean) || /session has ended|Exiting Claude/i.test(clean)) {
             agentTerminalIds.update(m => { m.delete(sessionId); return new Map(m); });
             entry!._exitBuffer = '';
             const resumeMatch = clean.match(/claude --resume ([a-f0-9-]+)/);
@@ -548,6 +563,7 @@
       const rawPrompt = getPurposePrompt(session.purpose) || session.contextPrompt || '';
       const purposePrompt = rawPrompt.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
 
+      spawning = true;
       const termId = await agentSpawnTerminal({
         sessionId: session.claudeSessionId || undefined,
         projectPath: spawnPath,
@@ -826,6 +842,13 @@
         unlistenFileDrop = unlisten;
       });
     } catch (_) {}
+
+    // Re-attach terminal after mode switch (component re-mount)
+    const currentSession = get(activeAgentSession);
+    if (currentSession) {
+      currentSessionId = null; // Force selectSession to process
+      requestAnimationFrame(() => selectSession(currentSession));
+    }
   });
 
   onDestroy(() => {
@@ -844,6 +867,12 @@
 {#if $activeAgentSession}
   <div class="agent-panel" bind:this={wrapperEl}>
     <div class="agent-terminal-main" style="width:{$agentShellOpen ? mainWidth + '%' : '100%'}">
+      {#if spawning}
+        <div class="agent-loading">
+          <div class="agent-loading-dot"></div>
+          <span>Launching session...</span>
+        </div>
+      {/if}
       <div class="agent-terminal-container" bind:this={terminalEl}></div>
     </div>
 
@@ -885,12 +914,48 @@
     flex-direction: column;
     overflow: hidden;
     min-width: 200px;
+    position: relative;
   }
 
   .agent-terminal-container {
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+  .agent-terminal-container :global(.xterm) {
+    animation: termFadeIn 0.4s ease;
+  }
+
+  .agent-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--t3);
+    font-size: 12px;
+    font-family: var(--ui);
+    z-index: 2;
+    animation: fadeIn 0.2s ease;
+  }
+  .agent-loading-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--acc);
+    animation: loadPulse 1s ease-in-out infinite;
+  }
+  @keyframes loadPulse {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes termFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   .agent-divider {
