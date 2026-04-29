@@ -232,7 +232,7 @@ pub fn run() {
             app.manage(modes::nosql::client::create_nosql_state());
             app.manage(modes::agent::models::TerminalState::default());
             app.manage(modes::ssh::models::SshTerminalState::default());
-            app.manage(commands::ai::types::PendingFrontendTools::default());
+            app.manage(shared::ai::types::PendingFrontendTools::default());
 
             // Register every mode's AI tools into the shared dispatch registry.
             // Adding a new tool to a mode = one new function + one entry in
@@ -379,13 +379,13 @@ pub fn run() {
             modes::nosql::client::nosql_list_saved_connections,
             modes::nosql::client::nosql_delete_saved_connection,
             modes::nosql::client::nosql_update_saved_connection,
-            commands::ai::test_ai_key,
-            commands::ai::get_ai_usage_stats,
-            commands::ai::get_ai_provider_stats,
-            commands::ai::reset_ai_usage,
-            commands::ai::record_ai_usage,
-            commands::ai::ai_chat,
-            commands::ai::ai_resolve_pending_tool,
+            shared::ai::test_ai_key,
+            shared::ai::get_ai_usage_stats,
+            shared::ai::get_ai_provider_stats,
+            shared::ai::reset_ai_usage,
+            shared::ai::record_ai_usage,
+            shared::ai::ai_chat,
+            shared::ai::ai_resolve_pending_tool,
             // Agent mode
             modes::agent::commands::agent_list_sessions,
             modes::agent::commands::agent_create_session,

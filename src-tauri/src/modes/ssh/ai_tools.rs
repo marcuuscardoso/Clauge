@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 
-use crate::commands::ai::types::PendingFrontendTools;
+use crate::shared::ai::types::PendingFrontendTools;
 use crate::shared::ai::dispatch::{register, ToolContext, ToolDescriptor, ToolFuture};
 
 fn execute_shell<'a>(ctx: &'a ToolContext<'a>) -> ToolFuture<'a> {

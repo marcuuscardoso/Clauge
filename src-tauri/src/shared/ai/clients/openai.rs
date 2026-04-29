@@ -5,10 +5,11 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncBufReadExt;
 use tokio_stream::StreamExt;
 
-use super::types::ChatContext;
 use crate::modes::sql::client::SqlConnectionManager;
 use crate::modes::nosql::client::NoSqlConnections;
+use crate::shared::ai::context::truncate_str;
 use crate::shared::ai::dispatch::{self, ToolContext};
+use crate::shared::ai::types::ChatContext;
 use crate::shared::ai::ProviderConfig;
 
 pub async fn stream_openai(
@@ -154,7 +155,7 @@ pub async fn stream_openai(
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.to_string());
             let error_body = response.text().await.unwrap_or_default();
-            log::error!("[AI OpenAI] Error {}: {}", status, super::context::truncate_str(&error_body, 500));
+            log::error!("[AI OpenAI] Error {}: {}", status, truncate_str(&error_body, 500));
             let msg = match status {
                 401 => "Invalid API key".to_string(),
                 429 => {
@@ -187,10 +188,10 @@ pub async fn stream_openai(
                             msg.to_string()
                         }
                         else {
-                            format!("API error ({}): {}", status, super::context::truncate_str(&error_body, 200))
+                            format!("API error ({}): {}", status, truncate_str(&error_body, 200))
                         }
                     } else {
-                        format!("API error ({}): {}", status, super::context::truncate_str(&error_body, 200))
+                        format!("API error ({}): {}", status, truncate_str(&error_body, 200))
                     }
                 }
             };

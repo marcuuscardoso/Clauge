@@ -23,7 +23,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
-use crate::commands::ai::types::ChatContext;
+use crate::shared::ai::types::ChatContext;
 use crate::modes::nosql::client::NoSqlConnections;
 use crate::modes::sql::client::SqlConnectionManager;
 
@@ -134,7 +134,7 @@ pub async fn execute<'a>(tool_name: &str, ctx: ToolContext<'a>) -> String {
         "[AI Tool] name={} result_len={} result_preview={}",
         tool_name,
         result.len(),
-        crate::commands::ai::context::truncate_str(&result, 300)
+        crate::shared::ai::context::truncate_str(&result, 300)
     );
     result
 }

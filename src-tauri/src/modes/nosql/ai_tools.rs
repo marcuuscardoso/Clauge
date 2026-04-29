@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 use tokio_stream::StreamExt;
 
-use crate::commands::ai::types::ChatContext;
+use crate::shared::ai::types::ChatContext;
 use super::client::NoSqlConnections;
 
 /// Parse a Redis command string respecting quoted arguments.

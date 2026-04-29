@@ -2,7 +2,7 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
-use crate::commands::ai::types::ChatContext;
+use crate::shared::ai::types::ChatContext;
 use crate::modes::sql::client::SqlConnectionManager;
 
 /// Ensure a database pool exists for the given connection_id + database combo.

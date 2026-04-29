@@ -5,10 +5,10 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncBufReadExt;
 use tokio_stream::StreamExt;
 
-use super::types::ChatContext;
 use crate::modes::sql::client::SqlConnectionManager;
 use crate::modes::nosql::client::NoSqlConnections;
 use crate::shared::ai::dispatch::{self, ToolContext};
+use crate::shared::ai::types::ChatContext;
 use crate::shared::ai::ProviderConfig;
 
 pub async fn stream_anthropic(

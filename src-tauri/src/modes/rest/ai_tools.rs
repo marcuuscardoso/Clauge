@@ -11,7 +11,7 @@
 use sqlx::SqlitePool;
 use tauri::Emitter;
 
-use crate::commands::ai::context::truncate_str;
+use crate::shared::ai::context::truncate_str;
 use crate::shared::ai::dispatch::{register, ToolContext, ToolDescriptor, ToolFuture};
 
 /// Resolve a request identifier — if it looks like a UUID use it directly,
