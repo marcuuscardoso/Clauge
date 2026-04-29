@@ -5,7 +5,8 @@
     loadConnections, deleteConnection, saveConnection, connectToDb, disconnectFromDb,
     showSqlConnectionDialog, editingSqlConnection, getLiveId, loadTablesForDb,
     insertQueryText, connectToDatabase, getDbLiveId, dbLiveConnections,
-    showSqlDisconnectConfirm, sqlDisconnectTarget
+    showSqlDisconnectConfirm, sqlDisconnectTarget,
+    sqlConnectionStates, sqlConnectionErrors, resetSqlConnState
   } from '../stores';
   import { sqlListSchemas, sqlDescribeTable, sqlExecuteQuery, sqlCreateDatabase } from '../commands';
   import { showToast } from '$lib/shared/primitives/toast';
@@ -138,8 +139,16 @@
   async function handleClickConnection(conn: SqlConnection) {
     activeConnectionId.set(conn.id);
     const alreadyConnected = $connectedIds.has(conn.id);
+    const state = $sqlConnectionStates.get(conn.id) ?? 'idle';
+
+    // Already attempting — clicking again must NOT fire a duplicate connect.
+    // The store also enforces this, but bailing here keeps behavior obvious.
+    if (state === 'connecting') return;
 
     if (!alreadyConnected) {
+      // If the previous attempt errored, treat the click as a retry: clear the
+      // error first so the indicator transitions back to `connecting` cleanly.
+      if (state === 'error') resetSqlConnState(conn.id);
       try {
         await connectToDb(conn.id);
         showToast(`Connected to ${conn.name}`, 'success');
@@ -613,20 +622,37 @@ ORDER BY ordinal_position;`);
       {@const isConnected = $connectedIds.has(conn.id)}
       {@const isExpanded = $expandedConnectionId === conn.id && isConnected}
       {@const databases = $connectionDatabases.get(conn.id) ?? []}
+      {@const connState = $sqlConnectionStates.get(conn.id) ?? 'idle'}
+      {@const isConnecting = connState === 'connecting'}
+      {@const hasError = connState === 'error'}
+      {@const errorMsg = $sqlConnectionErrors.get(conn.id) ?? ''}
 
       <!-- Connection Row -->
       <button
         class="tree-item tree-conn"
         class:active={$activeConnectionId === conn.id}
+        class:connecting={isConnecting}
+        class:errored={hasError}
+        title={hasError ? errorMsg : ''}
         onclick={() => handleClickConnection(conn)}
         oncontextmenu={(e) => showConnMenu(e, conn)}
       >
         <svg class="tree-chevron" class:open={isExpanded} viewBox="0 0 24 24">
           <path d="M9 18l6-6-6-6"/>
         </svg>
-        <span class="conn-dot" class:connected={isConnected}></span>
+        <span
+          class="conn-dot"
+          class:connected={isConnected}
+          class:connecting={isConnecting}
+          class:errored={hasError}
+        ></span>
         <span class="conn-driver">{driverLabel(conn.driver)}</span>
-        <span class="tree-label">{conn.name}</span>
+        <span class="tree-label">
+          {conn.name}
+          {#if isConnecting}
+            <span class="conn-state-text">Connecting<span class="conn-dots"></span></span>
+          {/if}
+        </span>
         {#if isConnected}
           <span class="conn-action" role="button" tabindex="-1" title="Create Database"
             onclick={(e) => { e.stopPropagation(); openCreateDbDialog(conn.id); }}>
@@ -873,6 +899,13 @@ ORDER BY ordinal_position;`);
     gap: 6px;
   }
   .tree-conn.active { background: color-mix(in srgb, var(--acc) 10%, transparent); }
+  /* Connecting: dim the row + suppress clicks. The store ALSO guards against
+     duplicate `sqlConnect` calls, but suppressing pointer events here makes the
+     "this is in flight" state visually obvious. */
+  .tree-conn.connecting { opacity: 0.7; pointer-events: none; }
+  /* Errored: subtle red tint so the row stands out at a glance. The full error
+     message is exposed via the row's `title` attribute (native tooltip). */
+  .tree-conn.errored { background: color-mix(in srgb, var(--err) 8%, transparent); }
   .tree-conn .tree-label { font-size: 12px; color: var(--t2); }
   .tree-conn.active .tree-label { color: var(--t1); }
 
@@ -895,6 +928,21 @@ ORDER BY ordinal_position;`);
     background: var(--t4); flex-shrink: 0; transition: background 0.2s;
   }
   .conn-dot.connected { background: var(--acc); box-shadow: 0 0 4px color-mix(in srgb, var(--acc) 40%, transparent); }
+  /* Connecting: amber pulse (matches NoSqlNav). The pulse keeps the dot from
+     looking frozen during long SSH-tunneled connects. */
+  .conn-dot.connecting { background: var(--warn); animation: sql-conn-pulse 1s ease-in-out infinite; }
+  .conn-dot.errored { background: var(--err); box-shadow: 0 0 4px color-mix(in srgb, var(--err) 50%, transparent); }
+  @keyframes sql-conn-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+  .conn-state-text {
+    font-size: 10px; color: var(--t3); font-family: var(--ui);
+    flex-shrink: 0; margin-left: 4px;
+  }
+  /* Animated "Connecting..." dots — pure CSS, no asset, no JS timer. */
+  .conn-dots::after { content: ''; animation: sql-conn-dots 1.4s steps(4, end) infinite; }
+  @keyframes sql-conn-dots {
+    0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; }
+  }
 
   .conn-driver {
     font-size: 9px; font-weight: 700;

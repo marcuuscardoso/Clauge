@@ -10,6 +10,40 @@ export const connectedIds = writable<Set<string>>(new Set());
 export const liveConnectionIds = writable<Record<string, string>>({});
 // Maps "savedConnId:dbName" -> live connection ID for per-database connections
 export const dbLiveConnections = writable<Record<string, string>>({});
+
+// Per-connection-row state machine, surfaced in nav for visual feedback during
+// the (potentially slow, 5-15s) connect path. Mirrors `sshConnStates` in
+// `modes/ssh/stores.ts` so the visual language is consistent across modes.
+export type SqlConnectionState = 'idle' | 'connecting' | 'connected' | 'error';
+export const sqlConnectionStates = writable<Map<string, SqlConnectionState>>(new Map());
+export const sqlConnectionErrors = writable<Map<string, string>>(new Map());
+
+function setSqlConnState(id: string, state: SqlConnectionState) {
+  sqlConnectionStates.update(m => {
+    const next = new Map(m);
+    if (state === 'idle') next.delete(id);
+    else next.set(id, state);
+    return next;
+  });
+}
+
+function setSqlConnError(id: string, message: string | null) {
+  sqlConnectionErrors.update(m => {
+    const next = new Map(m);
+    if (message) next.set(id, message);
+    else next.delete(id);
+    return next;
+  });
+}
+
+export function getSqlConnState(id: string): SqlConnectionState {
+  return get(sqlConnectionStates).get(id) ?? 'idle';
+}
+
+export function resetSqlConnState(id: string) {
+  setSqlConnState(id, 'idle');
+  setSqlConnError(id, null);
+}
 export const sqlScripts = writable<SqlScript[]>([]);
 export const showSqlConnectionDialog = writable(false);
 export const editingSqlConnection = writable<SqlConnection | null>(null);
@@ -164,26 +198,44 @@ export async function deleteConnection(id: string) {
     next.delete(id);
     return next;
   });
+  resetSqlConnState(id);
 }
 
 export async function connectToDb(connectionId: string) {
+  // Guard against duplicate clicks while a connect attempt is already in flight.
+  // The connect path can take 5-15s (russh handshake + auth + DB connect), and
+  // without this the user clicking again would fire another `sqlConnect` and
+  // open a parallel tunnel.
+  if (getSqlConnState(connectionId) === 'connecting') {
+    return get(liveConnectionIds)[connectionId] ?? null;
+  }
   const allConns = get(connections);
   const conn = allConns.find(c => c.id === connectionId);
   if (!conn) throw new Error('Connection not found');
-  const liveId = await sqlCmd.sqlConnect({
-    name: conn.name,
-    driver: conn.driver as any,
-    host: conn.host,
-    port: conn.port,
-    database: conn.databaseName,
-    username: conn.username,
-    password: conn.password,
-    ssl: !!conn.ssl,
-    // Forward the saved SSH profile so the backend opens the tunnel.
-    // Without this the rewritten host/port (127.0.0.1:<bound>) is never
-    // applied and the driver dials the original host directly.
-    sshProfileId: conn.sshProfileId ?? null,
-  });
+  setSqlConnState(connectionId, 'connecting');
+  setSqlConnError(connectionId, null);
+  let liveId: string;
+  try {
+    liveId = await sqlCmd.sqlConnect({
+      name: conn.name,
+      driver: conn.driver as any,
+      host: conn.host,
+      port: conn.port,
+      database: conn.databaseName,
+      username: conn.username,
+      password: conn.password,
+      ssl: !!conn.ssl,
+      // Forward the saved SSH profile so the backend opens the tunnel.
+      // Without this the rewritten host/port (127.0.0.1:<bound>) is never
+      // applied and the driver dials the original host directly.
+      sshProfileId: conn.sshProfileId ?? null,
+    });
+  } catch (e) {
+    setSqlConnState(connectionId, 'error');
+    setSqlConnError(connectionId, String(e));
+    throw e;
+  }
+  setSqlConnState(connectionId, 'connected');
   activeConnectionId.set(connectionId);
   connectedIds.update(s => {
     const next = new Set(s);
@@ -348,6 +400,7 @@ export async function disconnectFromDb(connectionId: string) {
     expandedConnectionId.set(null);
   }
   selectedDatabase.set('');
+  resetSqlConnState(connectionId);
 }
 
 // AI execution trigger — AI writes query + connection info, SqlPanel auto-executes
