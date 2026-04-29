@@ -13,6 +13,7 @@
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import { showContextMenu } from '$lib/shared/primitives/contextmenu';
   import type { SqlConnectionConfig, SqlConnection, TableInfo, ColumnInfo } from '../types';
+  import { descriptorFor } from '../dialects';
   import { tabs, activeTabId } from '$lib/shared/stores/tabs';
   import { get } from 'svelte/store';
 
@@ -468,7 +469,8 @@ ORDER BY ordinal_position;`);
             const lid = getLiveId(connId);
             if (!lid) throw new Error('Not connected');
             const conn = $connections.find(c => c.id === connId);
-            const dropStmt = conn?.driver === 'mysql' ? `DROP DATABASE \`${db}\`` : `DROP DATABASE "${db}"`;
+            const q = descriptorFor(conn?.driver ?? '')?.identifierQuote ?? '"';
+            const dropStmt = `DROP DATABASE ${q}${db}${q}`;
             await sqlExecuteQuery(lid, dropStmt);
             showToast(`Dropped database "${db}"`, 'success');
             // Refresh connection's database list from server
@@ -581,12 +583,7 @@ ORDER BY ordinal_position;`);
   // ── Helpers ──
 
   function driverLabel(driver: string): string {
-    switch (driver) {
-      case 'postgresql': return 'PG';
-      case 'mysql': return 'MY';
-      case 'sqlite': return 'SL';
-      default: return driver.substring(0, 2).toUpperCase();
-    }
+    return descriptorFor(driver)?.abbreviation ?? (driver ? driver.substring(0, 2).toUpperCase() : '?');
   }
 
   function columnLabel(col: ColumnInfo): string {

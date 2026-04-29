@@ -10,6 +10,7 @@
   import { history } from '@codemirror/commands';
   import { activeConnection } from '../stores';
   import type { TableInfo } from '../types';
+  import { parserProfileFor } from '../dialects';
   import { Parser as SqlParser } from 'node-sql-parser';
   import { splitSqlStatements } from '../utils/splitter';
   import { showToast } from '$lib/shared/primitives/toast';
@@ -30,10 +31,17 @@
   let sqlCompartment = new Compartment();
   let suppressExternalSync = false;
 
+  // CodeMirror dialect objects are imported per-driver; the registry only
+  // carries the profile name, so we map name -> object here. Unknown drivers
+  // fall through to PostgreSQL (matches the legacy default).
+  const CM_DIALECTS: Record<string, typeof PostgreSQL> = {
+    PostgreSQL,
+    MySQL,
+    SQLite,
+  };
+
   const dialect = $derived(
-    $activeConnection?.driver === 'mysql' ? MySQL :
-    $activeConnection?.driver === 'sqlite' ? SQLite :
-    PostgreSQL
+    CM_DIALECTS[parserProfileFor($activeConnection?.driver ?? '')] ?? PostgreSQL
   );
 
   function buildSchema() {
@@ -140,8 +148,7 @@
     if (trimmed.split(/\s+/).length < 2) return false;
 
     try {
-      const db = $activeConnection?.driver === 'mysql' ? 'MySQL' :
-                  $activeConnection?.driver === 'sqlite' ? 'SQLite' : 'PostgreSQL';
+      const db = parserProfileFor($activeConnection?.driver ?? '');
       sqlParser.astify(trimmed, { database: db });
       return true;
     } catch {

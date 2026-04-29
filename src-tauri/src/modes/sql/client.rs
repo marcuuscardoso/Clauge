@@ -8,6 +8,8 @@ use tauri::State;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use super::dialects::{descriptor_for_key, SqlDialect};
+
 // --- Types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,34 +103,48 @@ impl SqlConnectionManager {
 }
 
 // --- Helper to build connection strings ---
+//
+// The dispatch goes through the dialect registry, but each connection-string
+// format stays inline because the syntaxes are inherently per-driver.
+
+fn build_postgres_url(config: &SqlConnectionConfig) -> String {
+    let ssl_mode = if config.ssl { "require" } else { "prefer" };
+    format!(
+        "postgres://{}:{}@{}:{}/{}?sslmode={}",
+        config.username, config.password, config.host, config.port, config.database, ssl_mode
+    )
+}
+
+fn build_mysql_url(config: &SqlConnectionConfig) -> String {
+    let ssl_mode = if config.ssl { "REQUIRED" } else { "PREFERRED" };
+    format!(
+        "mysql://{}:{}@{}:{}/{}?ssl-mode={}",
+        config.username, config.password, config.host, config.port, config.database, ssl_mode
+    )
+}
+
+fn build_sqlite_url(config: &SqlConnectionConfig) -> String {
+    format!("sqlite:{}?mode=rwc", config.database)
+}
 
 fn build_connection_url(config: &SqlConnectionConfig) -> Result<String, String> {
-    match config.driver.as_str() {
-        "postgresql" => {
-            let ssl_mode = if config.ssl { "require" } else { "prefer" };
-            Ok(format!(
-                "postgres://{}:{}@{}:{}/{}?sslmode={}",
-                config.username, config.password, config.host, config.port, config.database, ssl_mode
-            ))
-        }
-        "mysql" => {
-            let ssl_mode = if config.ssl { "REQUIRED" } else { "PREFERRED" };
-            Ok(format!(
-                "mysql://{}:{}@{}:{}/{}?ssl-mode={}",
-                config.username, config.password, config.host, config.port, config.database, ssl_mode
-            ))
-        }
-        "sqlite" => Ok(format!("sqlite:{}?mode=rwc", config.database)),
-        _ => Err(format!("Unsupported driver: {}", config.driver)),
-    }
+    let descriptor = descriptor_for_key(&config.driver)
+        .ok_or_else(|| format!("Unsupported driver: {}", config.driver))?;
+    Ok(match descriptor.dialect {
+        SqlDialect::Postgres => build_postgres_url(config),
+        SqlDialect::MySql => build_mysql_url(config),
+        SqlDialect::Sqlite => build_sqlite_url(config),
+    })
 }
 
 pub async fn create_pool(config: &SqlConnectionConfig) -> Result<DatabasePool, String> {
+    let descriptor = descriptor_for_key(&config.driver)
+        .ok_or_else(|| format!("Unsupported driver: {}", config.driver))?;
     let url = build_connection_url(config)?;
     eprintln!("[Clauge SQL] create_pool driver={} host={} port={} db={} ssl={} user={}",
         config.driver, config.host, config.port, config.database, config.ssl, config.username);
-    match config.driver.as_str() {
-        "postgresql" => {
+    match descriptor.dialect {
+        SqlDialect::Postgres => {
             use sqlx::postgres::{PgConnectOptions, PgSslMode};
             use std::str::FromStr;
             let base_url = format!(
@@ -153,19 +169,18 @@ pub async fn create_pool(config: &SqlConnectionConfig) -> Result<DatabasePool, S
             eprintln!("[Clauge SQL] PostgreSQL connected OK");
             Ok(DatabasePool::Postgres(pool))
         }
-        "mysql" => {
+        SqlDialect::MySql => {
             let pool = sqlx::MySqlPool::connect(&url)
                 .await
                 .map_err(|e| format!("MySQL connection failed: {}", e))?;
             Ok(DatabasePool::MySql(pool))
         }
-        "sqlite" => {
+        SqlDialect::Sqlite => {
             let pool = sqlx::SqlitePool::connect(&url)
                 .await
                 .map_err(|e| format!("SQLite connection failed: {}", e))?;
             Ok(DatabasePool::Sqlite(pool))
         }
-        _ => Err(format!("Unsupported driver: {}", config.driver)),
     }
 }
 

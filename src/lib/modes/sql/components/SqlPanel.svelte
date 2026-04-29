@@ -13,6 +13,7 @@
   import { tabs, activeTabId, addTab } from '$lib/shared/stores/tabs';
   import { sqlExecuteQuery, sqlDescribeTable, sqlListSchemas } from '../commands';
   import type { TableInfo, SqlResultEntry, ColumnInfo } from '../types';
+  import { descriptorFor } from '../dialects';
   import { showToast } from '$lib/shared/primitives/toast';
   import { friendlyError } from '$lib/utils/errors';
   import { mode } from '$lib/stores/app';
@@ -139,12 +140,7 @@
 
   // Driver icon label helper
   function driverLabel(driver: string): string {
-    switch (driver) {
-      case 'postgresql': return 'PG';
-      case 'mysql': return 'MY';
-      case 'sqlite': return 'SL';
-      default: return driver.substring(0, 2).toUpperCase();
-    }
+    return descriptorFor(driver)?.abbreviation ?? (driver ? driver.substring(0, 2).toUpperCase() : '?');
   }
 
   // Find which connection owns the current database

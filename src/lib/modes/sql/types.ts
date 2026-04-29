@@ -1,8 +1,12 @@
-export type SqlDriver = 'postgresql' | 'mysql' | 'sqlite';
+import type { SqlDialectKey } from './dialects';
+
+// Re-export `SqlDialectKey` under its legacy name `SqlDriver` so existing
+// import sites keep compiling. The canonical definition lives in `./dialects`.
+export type { SqlDialectKey as SqlDriver } from './dialects';
 
 export interface SqlConnectionConfig {
   name: string;
-  driver: SqlDriver;
+  driver: SqlDialectKey;
   host: string;
   port: number;
   database: string;
@@ -14,7 +18,7 @@ export interface SqlConnectionConfig {
 export interface SqlConnection {
   id: string;
   name: string;
-  driver: SqlDriver;
+  driver: SqlDialectKey;
   host: string;
   port: number;
   databaseName: string;

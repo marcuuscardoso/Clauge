@@ -1,6 +1,7 @@
 <script lang="ts">
   import Modal from '$lib/shared/primitives/Modal.svelte';
   import type { SqlConnectionConfig, SqlDriver, SqlConnection } from '../types';
+  import { SQL_DIALECTS, defaultPortFor, descriptorFor } from '../dialects';
   import { sqlTestConnection } from '../commands';
   import { showToast } from '$lib/shared/primitives/toast';
 
@@ -13,16 +14,14 @@
 
   let { show = $bindable(false), editConnection = null, onsave, onclose }: Props = $props();
 
-  const DEFAULT_PORTS: Record<SqlDriver, number> = {
-    postgresql: 5432,
-    mysql: 3306,
-    sqlite: 0,
-  };
+  // Default new-connection driver — first registered dialect.
+  const DEFAULT_DRIVER: SqlDriver = SQL_DIALECTS[0].key;
+  const DEFAULT_PORT = SQL_DIALECTS[0].defaultPort;
 
   let name = $state('');
-  let driver = $state<SqlDriver>('postgresql');
+  let driver = $state<SqlDriver>(DEFAULT_DRIVER);
   let host = $state('localhost');
-  let port = $state(5432);
+  let port = $state(DEFAULT_PORT);
   let database = $state('');
   let username = $state('');
   let password = $state('');
@@ -41,9 +40,9 @@
       ssl = !!editConnection.ssl;
     } else if (show && !editConnection) {
       name = '';
-      driver = 'postgresql';
+      driver = DEFAULT_DRIVER;
       host = 'localhost';
-      port = 5432;
+      port = DEFAULT_PORT;
       database = '';
       username = '';
       password = '';
@@ -54,8 +53,10 @@
   function handleDriverChange(e: Event) {
     const newDriver = (e.target as HTMLSelectElement).value as SqlDriver;
     driver = newDriver;
-    port = DEFAULT_PORTS[newDriver];
+    port = defaultPortFor(newDriver);
   }
+
+  const usesHostPort = $derived(descriptorFor(driver)?.usesHostPort ?? false);
 
   async function handleTest() {
     testing = true;
@@ -89,13 +90,13 @@
     <label class="conn-field">
       <span class="conn-label">Driver</span>
       <select class="conn-select" value={driver} onchange={handleDriverChange}>
-        <option value="postgresql">PostgreSQL</option>
-        <option value="mysql">MySQL</option>
-        <option value="sqlite">SQLite</option>
+        {#each SQL_DIALECTS as d (d.key)}
+          <option value={d.key}>{d.displayName}</option>
+        {/each}
       </select>
     </label>
 
-    {#if driver !== 'sqlite'}
+    {#if usesHostPort}
       <div class="conn-row">
         <label class="conn-field" style="flex:2">
           <span class="conn-label">Host</span>
@@ -109,11 +110,11 @@
     {/if}
 
     <label class="conn-field">
-      <span class="conn-label">{driver === 'sqlite' ? 'File Path' : 'Database'}</span>
-      <input class="conn-input" type="text" bind:value={database} placeholder={driver === 'sqlite' ? '/path/to/db.sqlite' : 'mydb'} />
+      <span class="conn-label">{usesHostPort ? 'Database' : 'File Path'}</span>
+      <input class="conn-input" type="text" bind:value={database} placeholder={usesHostPort ? 'mydb' : '/path/to/db.sqlite'} />
     </label>
 
-    {#if driver !== 'sqlite'}
+    {#if usesHostPort}
       <div class="conn-row">
         <label class="conn-field" style="flex:1">
           <span class="conn-label">Username</span>
