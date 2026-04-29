@@ -1,3 +1,4 @@
+pub mod dispatch;
 pub mod providers;
 
 pub use providers::{
