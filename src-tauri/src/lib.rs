@@ -79,6 +79,32 @@ pub fn run() {
                 }
             }
 
+            // Windows 11: opt the main window into rounded corners via DWM.
+            // The attribute is silently ignored on Windows 10 (returns S_OK
+            // with no visual change), so it's safe to call unconditionally on
+            // any Windows version.
+            #[cfg(target_os = "windows")]
+            {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::Graphics::Dwm::{
+                    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+                };
+                if let Some(win) = app.get_webview_window("main") {
+                    if let Ok(hwnd_raw) = win.hwnd() {
+                        let hwnd = HWND(hwnd_raw.0 as *mut _);
+                        let preference = DWMWCP_ROUND;
+                        unsafe {
+                            let _ = DwmSetWindowAttribute(
+                                hwnd,
+                                DWMWA_WINDOW_CORNER_PREFERENCE,
+                                &preference as *const _ as *const _,
+                                std::mem::size_of::<i32>() as u32,
+                            );
+                        }
+                    }
+                }
+            }
+
             // Initialize sqlx connection pool for Rust commands
             let app_data_dir = app
                 .path()
