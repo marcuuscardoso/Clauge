@@ -63,4 +63,7 @@ window-vibrancy = "0.7"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 window-vibrancy = "0.7"
-windows = { version = "0.58", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
+# Match the windows-rs major Tauri 2.10 pulls in to avoid shipping two
+# copies of the crate. HWND is the same shape in both, so the cast in
+# appearance/window_chrome.rs works either way.
+windows = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
