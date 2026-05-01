@@ -4,6 +4,7 @@ import { navOpen, aiPanelOpen, aiPanelOpenPerMode, activeModal } from '$lib/stor
 import { tabs, activeTabId, closeTab, getDraft, markClean } from '$lib/shared/stores/tabs';
 import { commitRequest } from '$lib/modes/rest/stores';
 import { APP_EVENT } from '$lib/shared/constants/events';
+import { isMac } from '$lib/utils/platform';
 
 export function setupGlobalShortcuts() {
   document.addEventListener('keydown', handleKeydown);
@@ -138,8 +139,11 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
   }
 
-  // Ctrl+Cmd+F: toggle fullscreen
-  if (e.metaKey && e.ctrlKey && e.key === 'f') {
+  // Fullscreen: Ctrl+Cmd+F on macOS, F11 elsewhere
+  const isFullscreenShortcut = isMac()
+    ? e.metaKey && e.ctrlKey && e.key === 'f'
+    : e.key === 'F11' && !meta;
+  if (isFullscreenShortcut) {
     e.preventDefault();
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
       const win = getCurrentWindow();

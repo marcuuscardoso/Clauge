@@ -4,10 +4,11 @@
     onclose?: () => void;
   }
 
+  import { mod as platformMod } from '$lib/utils/platform';
+
   let { show, onclose }: Props = $props();
 
-  const isMac = typeof navigator !== 'undefined' && navigator.platform.includes('Mac');
-  const mod = isMac ? 'Cmd' : 'Ctrl';
+  const mod = platformMod();
 
   const shortcuts = [
     [`${mod}+Enter`, 'Send request / Run query'],
