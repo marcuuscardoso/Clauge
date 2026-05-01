@@ -416,6 +416,11 @@
     align-items: flex-start;
     cursor: pointer;
     padding: 8px 0;
+    user-select: none;
+  }
+  .about-channel-row,
+  .about-channel-row * {
+    cursor: pointer;
   }
   .about-channel-row input[type='checkbox'] {
     margin-top: 3px;
