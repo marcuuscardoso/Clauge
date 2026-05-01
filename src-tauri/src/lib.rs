@@ -508,10 +508,12 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            // macOS: clicking dock icon re-shows the hidden window
-            if let tauri::RunEvent::Reopen { .. } = event {
-                if let Some(window) = app_handle.get_webview_window("main") {
+        .run(|_app_handle, _event| {
+            // macOS: clicking dock icon re-shows the hidden window. The
+            // Reopen variant only exists in tauri's macOS feature set.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Some(window) = _app_handle.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
