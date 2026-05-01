@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { mode, navOpen, aiPanelOpen, activeModal } from '$lib/stores/app';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { isMac } from '$lib/utils/platform';
   import { activeHistoryEntry } from '$lib/modes/rest/stores';
   import { githubConnected, githubUsername, githubAvatarUrl, syncing, lastSyncedAt, setSyncing, setLastSynced, setDisconnected, showSyncRestorePrompt, markSynced } from '$lib/stores/github';
   import { gistSyncPush, gistSyncPull, githubDisconnect } from '$lib/commands/github';
@@ -20,6 +21,10 @@
   let profileMenuOpen = $state(false);
   let previousMode: AppMode = 'rest';
   let isFullscreen = $state(false);
+
+  // Custom traffic-light controls only on macOS, where the window is configured
+  // with decorations:false (via tauri.macos.conf.json). Win/Linux use native chrome.
+  const showCustomChrome = isMac();
 
 
   onMount(() => {
@@ -195,13 +200,15 @@
 
 <aside class="sidebar glass-surface">
   <div class="sidebar-drag" data-drag-region></div>
-  <div class="wc-area" data-drag-region>
-    <div class="wc-dots">
-      <button class="wc-dot wc-close" onclick={wcClose}></button>
-      <button class="wc-dot wc-min" onclick={wcMinimize}></button>
-      <button class="wc-dot wc-max" onclick={wcFullscreen}></button>
+  {#if showCustomChrome}
+    <div class="wc-area" data-drag-region>
+      <div class="wc-dots">
+        <button class="wc-dot wc-close" onclick={wcClose}></button>
+        <button class="wc-dot wc-min" onclick={wcMinimize}></button>
+        <button class="wc-dot wc-max" onclick={wcFullscreen}></button>
+      </div>
     </div>
-  </div>
+  {/if}
 
   <!-- Mode buttons -->
   <SidebarButton tip="Agent" active={$mode === 'agent'} dotColor="var(--agent, #d2a8ff)" id="sbi-agent" onclick={() => setMode('agent')}>

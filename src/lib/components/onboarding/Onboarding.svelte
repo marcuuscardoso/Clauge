@@ -5,6 +5,12 @@
   import { get } from 'svelte/store';
   import { testAiKey } from '$lib/commands/ai';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { isMac } from '$lib/utils/platform';
+
+  // Custom traffic-light controls only render on macOS, where the window
+  // is configured with decorations:false (via tauri.macos.conf.json).
+  // Win/Linux use native window chrome — duplicating buttons would clash.
+  const showCustomChrome = isMac();
 
   async function wcClose() { await getCurrentWindow().close(); }
   async function wcMinimize() { await getCurrentWindow().minimize(); }
@@ -170,14 +176,16 @@
 
 {#if show}
 <div class="onboarding-overlay" class:visible={mounted}>
-  <!-- Custom traffic-light controls (window has decorations:false) -->
-  <div class="onb-wc-area" data-drag-region>
-    <div class="onb-wc-dots">
-      <button class="onb-wc-dot onb-wc-close" onclick={wcClose} aria-label="Close"></button>
-      <button class="onb-wc-dot onb-wc-min" onclick={wcMinimize} aria-label="Minimize"></button>
-      <button class="onb-wc-dot onb-wc-max" onclick={wcFullscreen} aria-label="Fullscreen"></button>
+  {#if showCustomChrome}
+    <!-- Custom traffic-light controls (macOS — window has decorations:false) -->
+    <div class="onb-wc-area" data-drag-region>
+      <div class="onb-wc-dots">
+        <button class="onb-wc-dot onb-wc-close" onclick={wcClose} aria-label="Close"></button>
+        <button class="onb-wc-dot onb-wc-min" onclick={wcMinimize} aria-label="Minimize"></button>
+        <button class="onb-wc-dot onb-wc-max" onclick={wcFullscreen} aria-label="Fullscreen"></button>
+      </div>
     </div>
-  </div>
+  {/if}
   <div class="onboarding-container">
     <div class="steps-viewport">
       <div class="steps-track" style="transform: translateX({-step * 100}%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);">

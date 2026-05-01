@@ -36,74 +36,9 @@ pub fn run() {
                 )?;
             }
 
-            // Set rounded corners + dock icon
-            #[cfg(target_os = "macos")]
-            {
-                use cocoa::appkit::{NSApp, NSApplication, NSImage, NSWindow};
-                use cocoa::base::{nil, id};
-                use cocoa::foundation::NSData;
-
-                if let Some(win) = app.get_webview_window("main") {
-                    use objc::{runtime::Object, sel, sel_impl};
-                    let ns_win: *mut Object = win.ns_window().unwrap() as *mut Object;
-                    unsafe {
-                        let _: () = objc::msg_send![ns_win, setHasShadow: true];
-                        let content_view: *mut Object = objc::msg_send![ns_win, contentView];
-                        let _: () = objc::msg_send![content_view, setWantsLayer: true];
-                        let layer: *mut Object = objc::msg_send![content_view, layer];
-                        let _: () = objc::msg_send![layer, setCornerRadius: 10.0_f64];
-                        let _: () = objc::msg_send![layer, setMasksToBounds: true];
-                    }
-                }
-                let icon_data = include_bytes!("../icons/icon.png");
-                unsafe {
-                    let ns_data = NSData::dataWithBytes_length_(
-                        nil,
-                        icon_data.as_ptr() as *const std::ffi::c_void,
-                        icon_data.len() as u64,
-                    );
-                    let ns_image = NSImage::initWithData_(NSImage::alloc(nil), ns_data);
-                    NSApp().setApplicationIconImage_(ns_image);
-                }
-            }
-
-            // Win/Linux: enable native window decorations so the window has a
-            // working close button. The macOS build keeps decorations:false
-            // (configured in tauri.conf.json) and renders the custom traffic
-            // lights via the onboarding/topbar component. A cross-OS custom
-            // chrome is deferred — this gets us a usable Win/Linux window today.
-            #[cfg(not(target_os = "macos"))]
-            {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.set_decorations(true);
-                }
-            }
-
-            // Windows 11: opt the main window into rounded corners via DWM.
-            // The attribute is silently ignored on Windows 10 (returns S_OK
-            // with no visual change), so it's safe to call unconditionally on
-            // any Windows version.
-            #[cfg(target_os = "windows")]
-            {
-                use windows::Win32::Foundation::HWND;
-                use windows::Win32::Graphics::Dwm::{
-                    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-                };
-                if let Some(win) = app.get_webview_window("main") {
-                    if let Ok(hwnd_raw) = win.hwnd() {
-                        let hwnd = HWND(hwnd_raw.0 as *mut _);
-                        let preference = DWMWCP_ROUND;
-                        unsafe {
-                            let _ = DwmSetWindowAttribute(
-                                hwnd,
-                                DWMWA_WINDOW_CORNER_PREFERENCE,
-                                &preference as *const _ as *const _,
-                                std::mem::size_of::<i32>() as u32,
-                            );
-                        }
-                    }
-                }
-            }
+            // Per-OS window chrome (rounded corners on macOS/Win11, dock icon
+            // on macOS, no-op on Linux).
+            appearance::window_chrome::apply(app);
 
             // Initialize sqlx connection pool for Rust commands
             let app_data_dir = app
