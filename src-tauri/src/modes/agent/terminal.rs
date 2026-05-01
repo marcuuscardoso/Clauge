@@ -8,6 +8,22 @@ use tauri::ipc::Channel;
 use tauri::State;
 use uuid::Uuid;
 
+#[cfg(target_os = "windows")]
+fn apply_windows_env(cmd: &mut CommandBuilder) {
+    if let Some(home) = dirs::home_dir() {
+        cmd.env("USERPROFILE", home.to_string_lossy().to_string());
+    }
+    if let Ok(v) = std::env::var("APPDATA") {
+        cmd.env("APPDATA", v);
+    }
+    if let Ok(v) = std::env::var("LOCALAPPDATA") {
+        cmd.env("LOCALAPPDATA", v);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_windows_env(_cmd: &mut CommandBuilder) {}
+
 #[tauri::command]
 pub fn agent_spawn_terminal(
     state: State<'_, TerminalState>,
@@ -41,6 +57,7 @@ pub fn agent_spawn_terminal(
     cmd.arg("-l"); cmd.arg("-i"); cmd.arg("-c"); cmd.arg(&spawn_cmd);
     cmd.cwd(&project_path);
     if let Some(home) = dirs::home_dir() { cmd.env("HOME", home.to_string_lossy().to_string()); }
+    apply_windows_env(&mut cmd);
     cmd.env("TERM", "xterm-256color");
     if let Some(ref name) = git_name { cmd.env("GIT_AUTHOR_NAME", name); cmd.env("GIT_COMMITTER_NAME", name); }
     if let Some(ref email) = git_email { cmd.env("GIT_AUTHOR_EMAIL", email); cmd.env("GIT_COMMITTER_EMAIL", email); }
@@ -87,6 +104,7 @@ pub fn agent_spawn_shell(
     let mut cmd = CommandBuilder::new(&user_shell);
     cmd.arg("-l"); cmd.arg("-i"); cmd.cwd(&project_path);
     if let Some(home) = dirs::home_dir() { cmd.env("HOME", home.to_string_lossy().to_string()); }
+    apply_windows_env(&mut cmd);
     cmd.env("TERM", "xterm-256color");
 
     let child = pty_pair.slave.spawn_command(cmd).map_err(|e| format!("Failed to spawn shell: {}", e))?;
