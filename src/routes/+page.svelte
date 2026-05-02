@@ -10,10 +10,29 @@
   import HistoryViewer from '$lib/modes/rest/components/HistoryViewer.svelte';
 </script>
 
+<!--
+  All mode panels are mounted continuously; only the active one is visible.
+  This preserves expensive per-mode state (xterm terminals + SSH Handles in
+  Agent / SSH, SFTP sessions in Explorer, CodeMirror editors + result tables
+  in SQL/NoSQL, scroll/focus state everywhere) across mode switches.
+
+  Previously this used `{#if mode === 'X'}` per panel, which unmounted the
+  panel on every mode switch and triggered each panel's `onDestroy` — that
+  killed terminal PTYs, SSH `Handle`s, and SFTP sessions. Switching back
+  reconnected from scratch (re-auth, OTP prompt, etc.).
+
+  Stacking with `position: absolute; inset: 0` + visibility/pointer-events
+  toggle keeps each panel sized correctly even while hidden (visibility:
+  hidden keeps layout). Performance cost: idle panels hold a Svelte
+  component but no active resources (terminals only spawn when the user
+  opens a session inside that mode).
+-->
 <div class="workspace">
-  {#if $mode === 'agent'}
+  <div class="panel" class:active={$mode === 'agent'}>
     <AgentPanel />
-  {:else if $mode === 'history'}
+  </div>
+
+  <div class="panel" class:active={$mode === 'history'}>
     {#if $activeHistoryEntry}
       <HistoryViewer />
     {:else}
@@ -22,25 +41,54 @@
         <span>Select an entry from history to view details</span>
       </div>
     {/if}
-  {:else if $mode === 'rest'}
+  </div>
+
+  <div class="panel" class:active={$mode === 'rest'}>
     <RestPanel />
-  {:else if $mode === 'sql'}
+  </div>
+
+  <div class="panel" class:active={$mode === 'sql'}>
     <SqlPanel />
-  {:else if $mode === 'nosql'}
+  </div>
+
+  <div class="panel" class:active={$mode === 'nosql'}>
     <NoSqlPanel />
-  {:else if $mode === 'ssh'}
+  </div>
+
+  <div class="panel" class:active={$mode === 'ssh'}>
     <SshPanel />
-  {:else if $mode === 'explorer'}
+  </div>
+
+  <div class="panel" class:active={$mode === 'explorer'}>
     <ExplorerPanel />
-  {/if}
+  </div>
 </div>
 
 <style>
   .workspace {
     flex: 1;
-    display: flex;
+    /* Becomes the containing block for the absolutely-positioned panels. */
+    position: relative;
     min-height: 0;
     overflow: hidden;
+  }
+  .panel {
+    /* Stack — all panels share the same rectangle, fill the workspace. */
+    position: absolute;
+    inset: 0;
+    display: flex;
+    /* Hidden by default. `visibility: hidden` (rather than display:none)
+       keeps each panel's layout calculated, so xterm.js/CodeMirror don't
+       see a 0×0 container and miscalibrate when the panel becomes active. */
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .panel.active {
+    visibility: visible;
+    pointer-events: auto;
+    /* Float above siblings — needed because all panels share the same
+       z-index plane otherwise. */
+    z-index: 1;
   }
   .history-empty {
     flex: 1;

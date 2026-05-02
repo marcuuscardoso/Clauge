@@ -14,6 +14,8 @@
   import SidebarButton from './SidebarButton.svelte';
   import Avatar from './Avatar.svelte';
   import type { AppMode } from '$lib/stores/app';
+  import { tabs, activeTabId, activateTab } from '$lib/shared/stores/tabs';
+  import { get } from 'svelte/store';
   import { checkAndDownloadUpdate, showWhatsNewModal, whatsNewContent, updateAvailable } from '$lib/utils/updater';
   import { showToast } from '$lib/shared/primitives/toast';
   import { FULLSCREEN_POLL_INTERVAL_MS } from '$lib/shared/constants/timings';
@@ -60,6 +62,22 @@
     mode.set(m);
     activeHistoryEntry.set(null);
     navOpen.set(true);
+
+    // Tabs persist globally but `activeTabId` doesn't auto-track mode
+    // changes — so after a sidebar-driven mode switch, the active tab can
+    // belong to a different mode, leaving the new mode's panel showing
+    // the empty state even though it has tabs. Auto-activate the most
+    // recent tab of the new mode if the current active tab isn't there.
+    // History is excluded — it's a transient view, not a normal mode.
+    if (m === 'history') return;
+    const currentActiveId = get(activeTabId);
+    const allTabs = get(tabs);
+    const currentTab = allTabs.find((t) => t.id === currentActiveId);
+    if (currentTab && currentTab.mode === m) return;
+    const newModeTabs = allTabs.filter((t) => t.mode === m);
+    if (newModeTabs.length > 0) {
+      activateTab(newModeTabs[newModeTabs.length - 1].id);
+    }
   }
 
   function toggleHistory() {

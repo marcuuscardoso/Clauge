@@ -42,11 +42,12 @@ function handleKeydown(e: KeyboardEvent) {
     const allTabs = get(tabs);
     const tab = allTabs.find(t => t.id === tabId);
     if (!tab) return;
-    // SSH and Agent tabs need PTY/connection cleanup beyond a plain closeTab —
-    // route them through Topbar's prompt handler which calls doCloseTab and
-    // runs the proper teardown (kill terminal, switch active profile, reset
-    // spawning state). REST tabs only need the prompt when dirty.
-    if (tab.mode === 'agent' || tab.mode === 'ssh' || tab.dirty || tab.unsaved) {
+    // SSH, Agent, and Explorer tabs need session cleanup beyond a plain
+    // closeTab — route them through Topbar's prompt handler which calls
+    // doCloseTab and runs the proper teardown (kill terminal, switch
+    // active profile, close Rust-side session, reset spawning state).
+    // REST tabs only need the prompt when dirty.
+    if (tab.mode === 'agent' || tab.mode === 'ssh' || tab.mode === 'explorer' || tab.dirty || tab.unsaved) {
       window.dispatchEvent(new CustomEvent(APP_EVENT.TAB_CLOSE_PROMPT, { detail: { tabId } }));
     } else {
       closeTab(tabId);

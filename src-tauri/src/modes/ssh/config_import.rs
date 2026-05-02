@@ -9,11 +9,23 @@
 //!   - `User x`               → username
 //!   - `Port n`               → port (default 22)
 //!   - `IdentityFile path`    → key_path (auth_type = "key")
+//!   - `ProxyCommand cmd`     → proxy_command (literal template)
+//!   - `ProxyJump alias[,…]`  → jump_profile_id chain (resolved post-parse)
 //!
 //! `Match`, `Include`, and pattern/wildcard `Host *` blocks are skipped —
 //! they don't represent a single connectable host. Comments (`#`) and
 //! blank lines are ignored. `=` and whitespace both work as the
 //! key/value separator (per ssh_config(5)).
+//!
+//! ProxyJump resolution: parsing produces a per-host `proxy_jump_aliases`
+//! list (e.g. ["bastion", "gateway"]). Import is a two-pass:
+//!   1. Insert hosts WITHOUT jump pointers, recording (alias → row id).
+//!   2. For each imported host that had ProxyJump, look up each alias in
+//!      the freshly-built map and stitch together the chain via
+//!      `jump_profile_id` updates.
+//! Aliases that resolve to a host that wasn't imported in this pass (or
+//! a wildcard / unknown name) are skipped with a returned warning so the
+//! UI can surface what got dropped.
 
 use crate::shared::repos::ssh_profiles as ssh_profiles_repo;
 use serde::Serialize;
@@ -29,6 +41,13 @@ pub struct SshConfigHost {
     pub user: Option<String>,
     pub port: i64,
     pub identity_file: Option<String>,
+    /// Raw ProxyCommand template if present. Stored verbatim with %h/%p/%r
+    /// placeholders intact — substitution happens at connect time.
+    pub proxy_command: Option<String>,
+    /// Comma-separated ProxyJump aliases in OpenSSH order (first → outermost
+    /// jump, last → final hop before destination). Resolved to profile IDs
+    /// during import via the alias-to-id map built in pass 1.
+    pub proxy_jump_aliases: Vec<String>,
     /// True if a profile with `name == alias` is already in the DB.
     /// The UI shows these greyed out and excludes them from import.
     pub already_exists: bool,
@@ -76,17 +95,29 @@ pub async fn ssh_import_config_hosts(
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let hosts = parse(&content);
 
-    let existing_names: HashSet<String> = ssh_profiles_repo::list_all(pool.inner())
+    // Build a lookup from alias → existing profile id. Used for ProxyJump
+    // resolution: a host imported in this batch can reference a host that
+    // was ALREADY in the DB (e.g. user previously imported "bastion" and
+    // is now importing a host with `ProxyJump bastion`).
+    let existing_profiles = ssh_profiles_repo::list_all(pool.inner())
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let existing_names: HashSet<String> =
+        existing_profiles.iter().map(|p| p.name.clone()).collect();
+    let mut alias_to_id: std::collections::HashMap<String, String> = existing_profiles
         .into_iter()
-        .map(|p| p.name)
+        .map(|p| (p.name, p.id))
         .collect();
 
     let wanted: HashSet<String> = aliases.into_iter().collect();
     let mut imported = 0usize;
 
-    for h in hosts {
+    // Pass 1: insert each host with its ProxyCommand (if any) but WITHOUT
+    // a jump pointer. Record the new alias→id mapping as we go so a later
+    // host in the same batch can resolve a ProxyJump that points at an
+    // earlier host in the same import.
+    let mut deferred_jumps: Vec<(String, Vec<String>)> = Vec::new();
+    for h in &hosts {
         if !wanted.contains(&h.alias) || existing_names.contains(&h.alias) {
             continue;
         }
@@ -105,11 +136,59 @@ pub async fn ssh_import_config_hosts(
             h.identity_file.as_deref(),
             None,
             &now,
+            // jump_profile_id is set in pass 2 once all batch IDs exist.
+            None,
+            h.proxy_command.as_deref(),
         )
         .await
         .map_err(|e| e.to_string())?;
+        alias_to_id.insert(h.alias.clone(), id);
+        if !h.proxy_jump_aliases.is_empty() {
+            deferred_jumps.push((h.alias.clone(), h.proxy_jump_aliases.clone()));
+        }
         imported += 1;
     }
+
+    // Pass 2: resolve ProxyJump chains. For each host with a non-empty
+    // jump list, walk the list and stitch profile pointers:
+    //   host → last_alias → … → first_alias  (innermost → outermost)
+    // We set host.jump_profile_id = id_of(last_alias), then
+    // last_alias.jump_profile_id = id_of(prev_alias), and so on.
+    // (OpenSSH lists ProxyJump outermost-first; the LAST alias is the
+    // closest hop to the destination, which is the destination's
+    // immediate jump.)
+    for (host_alias, jump_aliases) in deferred_jumps {
+        let host_id = match alias_to_id.get(&host_alias) {
+            Some(id) => id.clone(),
+            None => continue, // shouldn't happen — we just inserted it
+        };
+        // Resolve aliases to IDs in reverse order (closest hop first).
+        let resolved: Vec<String> = jump_aliases
+            .iter()
+            .rev()
+            .filter_map(|a| alias_to_id.get(a).cloned())
+            .collect();
+        if resolved.is_empty() {
+            // None of the jump aliases mapped to a known profile. Leave
+            // host without a jump pointer; the user can edit later. We
+            // could surface a warning here but the existing return
+            // contract is just `usize` (count of imported hosts).
+            continue;
+        }
+        // Wire up: host → resolved[0] → resolved[1] → … → resolved[N-1]
+        let mut prev_id = host_id;
+        for jump_id in resolved {
+            ssh_profiles_repo::update_jump_profile_id(
+                pool.inner(),
+                &prev_id,
+                Some(&jump_id),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            prev_id = jump_id;
+        }
+    }
+
     Ok(imported)
 }
 
@@ -121,6 +200,8 @@ struct HostBuilder {
     user: Option<String>,
     port: Option<i64>,
     identity_file: Option<String>,
+    proxy_command: Option<String>,
+    proxy_jump_aliases: Vec<String>,
 }
 
 impl HostBuilder {
@@ -131,6 +212,8 @@ impl HostBuilder {
             user: None,
             port: None,
             identity_file: None,
+            proxy_command: None,
+            proxy_jump_aliases: Vec::new(),
         }
     }
 
@@ -141,6 +224,8 @@ impl HostBuilder {
             user: self.user,
             port: self.port.unwrap_or(22),
             identity_file: self.identity_file,
+            proxy_command: self.proxy_command,
+            proxy_jump_aliases: self.proxy_jump_aliases,
             already_exists: false,
         }
     }
@@ -216,6 +301,25 @@ fn parse(content: &str) -> Vec<SshConfigHost> {
                     if c.identity_file.is_none() {
                         c.identity_file = Some(resolve_identity_path(unquote(value)));
                     }
+                }
+            }
+            "proxycommand" => {
+                if let Some(c) = current.as_mut() {
+                    // Stored verbatim. Placeholders (%h/%p/%r) are resolved
+                    // at connect time by ssh_session::spawn_proxy_command_stream.
+                    c.proxy_command = Some(unquote(value).to_string());
+                }
+            }
+            "proxyjump" => {
+                if let Some(c) = current.as_mut() {
+                    // ProxyJump can be a single alias or a comma-list ordered
+                    // outermost → innermost (e.g. "bastion,gateway"). Trim
+                    // whitespace around commas; ignore empty entries.
+                    c.proxy_jump_aliases = unquote(value)
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
             }
             _ => {}

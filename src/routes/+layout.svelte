@@ -45,6 +45,7 @@
   import Onboarding from '$lib/components/onboarding/Onboarding.svelte';
   import WhatsNewModal from '$lib/shared/primitives/WhatsNewModal.svelte';
   import UpdateNotification from '$lib/shared/primitives/UpdateNotification.svelte';
+  import SshAuthPromptsModal from '$lib/modes/ssh/components/SshAuthPromptsModal.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { get } from 'svelte/store';
   import { SSH_EVENT, AGENT_EVENT, APP_EVENT, EXPLORER_EVENT } from '$lib/shared/constants/events';
@@ -528,6 +529,7 @@
 <Onboarding />
 <WhatsNewModal />
 <UpdateNotification />
+<SshAuthPromptsModal />
 <ConfirmDialog
   bind:show={$showSqlDisconnectConfirm}
   title="Disconnect"

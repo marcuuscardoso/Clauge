@@ -117,6 +117,12 @@ pub fn run() {
             app.manage(modes::nosql::client::create_nosql_state());
             app.manage(modes::agent::models::TerminalState::default());
             app.manage(modes::ssh::models::SshTerminalState::default());
+            app.manage(modes::ssh::models::PendingAuthPrompts::default());
+            // Stash the AppHandle so the keyboard-interactive auth flow
+            // (in modes/ssh/ssh_session.rs) can emit prompt events to the
+            // frontend without threading AppHandle through every connect
+            // entry point (terminal, tunnel, explorer all already exist).
+            modes::ssh::ssh_session::set_app_handle(app.handle().clone());
             app.manage(modes::explorer::session::ExplorerSessions::default());
             app.manage(modes::explorer::transfers::Transfers::default());
             app.manage(shared::ai::types::PendingFrontendTools::default());
@@ -385,6 +391,7 @@ pub fn run() {
             modes::ssh::terminal::ssh_resize_terminal,
             modes::ssh::terminal::ssh_kill_terminal,
             modes::ssh::tunnel::ssh_tunnel_test,
+            modes::ssh::ssh_session::ssh_submit_auth_prompts,
             modes::ssh::config_import::ssh_read_config_hosts,
             modes::ssh::config_import::ssh_import_config_hosts,
         ])

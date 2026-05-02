@@ -1,7 +1,7 @@
 <script lang="ts">
   import Modal from '$lib/shared/primitives/Modal.svelte';
   import { sshUpdateProfile } from '../commands';
-  import { loadSshProfiles } from '../stores';
+  import { loadSshProfiles, sshProfiles } from '../stores';
   import { showToast } from '$lib/shared/primitives/toast';
   import type { SshAuthType, SshProfile } from '../types';
   import { SSH_EVENT } from '$lib/shared/constants/events';
@@ -19,17 +19,42 @@
   let revealSecret = $state(false);
   let loading = $state(false);
 
+  type ConnectionMode = 'direct' | 'jump' | 'command';
+  let connectionMode = $state<ConnectionMode>('direct');
+  let jumpProfileId = $state<string>('');
+  let proxyCommand = $state('');
+
   $effect(() => {
     if (profile && show) {
       name = profile.name;
       host = profile.host;
       port = profile.port;
       username = profile.username;
-      authType = profile.authType;
+      // Migrate legacy 'interactive' auth_type → 'password' on display.
+      // Backend treats them equivalently now (password auto-falls-back to
+      // interactive prompts on rejection); the explicit 'interactive' chip
+      // was removed from the UI. Saving will persist the new value.
+      authType = profile.authType === 'interactive' ? 'password' : profile.authType;
       keyPath = profile.keyPath ?? '';
       passphrase = '';
       password = '';
       revealSecret = false;
+      // Initialize connection mode from existing profile fields. ProxyCommand
+      // wins over jumpProfileId if both are populated, matching the connect
+      // path's precedence so the user sees what's actually being used.
+      if (profile.proxyCommand) {
+        connectionMode = 'command';
+        proxyCommand = profile.proxyCommand;
+        jumpProfileId = profile.jumpProfileId ?? '';
+      } else if (profile.jumpProfileId) {
+        connectionMode = 'jump';
+        jumpProfileId = profile.jumpProfileId;
+        proxyCommand = '';
+      } else {
+        connectionMode = 'direct';
+        jumpProfileId = '';
+        proxyCommand = '';
+      }
     }
   });
 
@@ -71,6 +96,12 @@
         // Only send `secret` if the user typed something — empty strings keep existing.
         secret: authType === 'password' && password ? password : undefined,
         passphrase: authType === 'key' && passphrase ? passphrase : undefined,
+        // Connection routing — empty string clears the column, present value sets it.
+        // The Rust update path treats "" as a clear sentinel for both fields.
+        jumpProfileId:
+          connectionMode === 'jump' && jumpProfileId ? jumpProfileId : '',
+        proxyCommand:
+          connectionMode === 'command' && proxyCommand.trim() ? proxyCommand.trim() : '',
       });
       await loadSshProfiles();
       window.dispatchEvent(new CustomEvent(SSH_EVENT.PROFILE_UPDATED, { detail: updated }));
@@ -159,19 +190,68 @@
         </label>
       {:else}
         <label class="ns-field">
-          <span class="ns-label">Password</span>
+          <span class="ns-label">Password <span class="ns-optional">(optional)</span></span>
           <div class="ns-path-row">
             <input
               class="ns-input ns-path-input"
               type={revealSecret ? 'text' : 'password'}
               bind:value={password}
-              placeholder="Leave blank to keep existing"
+              placeholder="Leave blank to keep existing or enter at connect time"
               autocomplete="off"
             />
             <button class="ns-btn-browse" type="button" onclick={() => (revealSecret = !revealSecret)}>
               {revealSecret ? 'Hide' : 'Show'}
             </button>
           </div>
+        </label>
+        <span class="ns-optional">
+          If your server uses multi-step auth (password + OTP), you'll be prompted for the additional
+          steps each time you connect.
+        </span>
+      {/if}
+
+      <div class="ns-field">
+        <span class="ns-label">Connection</span>
+        <div class="ns-radio-row">
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <span class="ns-chip" class:selected={connectionMode === 'direct'} onclick={() => (connectionMode = 'direct')}>Direct</span>
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <span class="ns-chip" class:selected={connectionMode === 'jump'} onclick={() => (connectionMode = 'jump')}>Through SSH jump host</span>
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <span class="ns-chip" class:selected={connectionMode === 'command'} onclick={() => (connectionMode = 'command')}>Through proxy command</span>
+        </div>
+      </div>
+
+      {#if connectionMode === 'jump'}
+        <label class="ns-field">
+          <span class="ns-label">Jump Host</span>
+          <select class="ns-input" bind:value={jumpProfileId}>
+            <option value="">— Select a profile —</option>
+            {#each $sshProfiles.filter((p) => p.id !== profile.id) as p (p.id)}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </select>
+          <span class="ns-optional">
+            The SSH session connects to this profile first, then opens a tunneled channel to the destination.
+            For multi-hop chains, set the jump profile's own jump host.
+          </span>
+        </label>
+      {:else if connectionMode === 'command'}
+        <label class="ns-field">
+          <span class="ns-label">Proxy Command</span>
+          <input
+            class="ns-input"
+            type="text"
+            bind:value={proxyCommand}
+            placeholder="cloudflared access ssh --hostname %h"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <span class="ns-optional">
+            Spawned as a subprocess that proxies SSH bytes via stdin/stdout. Supports <code>%h</code> (host),
+            <code>%p</code> (port), <code>%r</code> (username) placeholders. Tokenized as argv — does NOT
+            run through a shell.
+          </span>
         </label>
       {/if}
 
@@ -230,4 +310,11 @@
   }
   .ns-btn-create:hover:not(:disabled) { filter: brightness(1.1); }
   .ns-btn-create:disabled { opacity: 0.4; cursor: not-allowed; }
+  .ns-optional {
+    font-size: 11px; color: var(--t3); font-family: var(--ui); margin-top: 2px;
+  }
+  .ns-optional code {
+    font-family: var(--mono); font-size: 11px; padding: 1px 4px;
+    background: rgba(255,255,255,0.06); border-radius: 3px;
+  }
 </style>

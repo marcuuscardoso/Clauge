@@ -4,7 +4,8 @@ use crate::modes::ssh::models::SshProfile;
 
 pub async fn list_all(pool: &SqlitePool) -> Result<Vec<SshProfile>, sqlx::Error> {
     sqlx::query_as::<_, SshProfile>(
-        "SELECT id, name, host, port, username, auth_type, key_path, accent_color, last_used_at, created_at \
+        "SELECT id, name, host, port, username, auth_type, key_path, accent_color, \
+                last_used_at, created_at, jump_profile_id, proxy_command \
          FROM ssh_profiles \
          ORDER BY (last_used_at IS NULL), last_used_at DESC, created_at DESC",
     )
@@ -31,10 +32,14 @@ pub async fn insert(
     key_path: Option<&str>,
     accent_color: Option<&str>,
     created_at: &str,
+    jump_profile_id: Option<&str>,
+    proxy_command: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO ssh_profiles (id, name, host, port, username, auth_type, key_path, accent_color, last_used_at, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+        "INSERT INTO ssh_profiles \
+            (id, name, host, port, username, auth_type, key_path, accent_color, \
+             last_used_at, created_at, jump_profile_id, proxy_command) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
     )
     .bind(id)
     .bind(name)
@@ -45,6 +50,8 @@ pub async fn insert(
     .bind(key_path)
     .bind(accent_color)
     .bind(created_at)
+    .bind(jump_profile_id)
+    .bind(proxy_command)
     .execute(pool)
     .await?;
     Ok(())
@@ -144,6 +151,34 @@ pub async fn touch_last_used(
 ) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE ssh_profiles SET last_used_at = ? WHERE id = ?")
         .bind(last_used_at)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set or clear the jump-host pointer. Pass `None` to clear (direct connect).
+pub async fn update_jump_profile_id(
+    pool: &SqlitePool,
+    id: &str,
+    jump_profile_id: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE ssh_profiles SET jump_profile_id = ? WHERE id = ?")
+        .bind(jump_profile_id)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set or clear the proxy-command template. Pass `None` to clear.
+pub async fn update_proxy_command(
+    pool: &SqlitePool,
+    id: &str,
+    proxy_command: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE ssh_profiles SET proxy_command = ? WHERE id = ?")
+        .bind(proxy_command)
         .bind(id)
         .execute(pool)
         .await?;

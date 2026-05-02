@@ -21,6 +21,8 @@ export const sshCreateProfile = (args: SshCreateProfileArgs) =>
     accentColor: args.accentColor ?? null,
     secret: args.secret ?? null,
     passphrase: args.passphrase ?? null,
+    jumpProfileId: args.jumpProfileId ?? null,
+    proxyCommand: args.proxyCommand ?? null,
   });
 
 export const sshUpdateProfile = (args: SshUpdateProfileArgs) =>
@@ -35,6 +37,9 @@ export const sshUpdateProfile = (args: SshUpdateProfileArgs) =>
     accentColor: args.accentColor ?? null,
     secret: args.secret ?? null,
     passphrase: args.passphrase ?? null,
+    // null = leave field alone, "" = clear, "value" = set.
+    jumpProfileId: args.jumpProfileId ?? null,
+    proxyCommand: args.proxyCommand ?? null,
   });
 
 export const sshDeleteProfile = (id: string) => invoke<void>('ssh_delete_profile', { id });
@@ -73,3 +78,10 @@ export const sshResizeTerminal = (terminalId: string, cols: number, rows: number
 
 export const sshKillTerminal = (terminalId: string) =>
   invoke<void>('ssh_kill_terminal', { terminalId });
+
+// ── Keyboard-interactive auth prompts ────────────────────────────────────────
+
+/** Send the user-collected answers to the parked auth flow on the Rust side.
+ *  `requestId` matches the payload from the `ssh:auth-prompts` event. */
+export const sshSubmitAuthPrompts = (requestId: string, answers: string[]) =>
+  invoke<void>('ssh_submit_auth_prompts', { requestId, answers });

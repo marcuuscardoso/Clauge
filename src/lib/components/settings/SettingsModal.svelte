@@ -1435,7 +1435,7 @@
             <span class="about-app-name">Clauge</span>
             <span class="about-version">v{appVersion || '—'}</span>
           </div>
-          <p class="about-desc">The world's first AI-powered developer toolkit with built-in REST client, SQL & NoSQL database management, environment variables, GitHub sync, and more — all in one beautiful desktop app.</p>
+          <p class="about-desc">An AI-powered cross-platform desktop super-app for developers. One shell, many tools.</p>
 
           <!-- Update channel -->
           <div class="about-section-label">UPDATES</div>

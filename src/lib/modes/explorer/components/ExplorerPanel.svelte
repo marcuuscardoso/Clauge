@@ -15,8 +15,19 @@
   // The set of explorer tabs currently open. Each tab has an associated
   // session held in Rust state (keyed by tabKey).
   const explorerTabs = $derived($tabs.filter((t) => t.mode === 'explorer'));
+  // Prefer the global active tab when it IS an explorer tab; otherwise
+  // fall back to the most recent explorer tab. Without this fallback,
+  // switching mode (which doesn't auto-update activeTabId in some flows)
+  // would null out activeTab and force FilesBrowser to unmount via the
+  // `{#key activeTabKey}` block below — re-fetching the whole directory
+  // listing on every mode-switch round-trip. The fallback keeps
+  // activeTabKey stable across non-explorer mode switches, so the
+  // SFTP/FTP/S3 session AND its UI state (cwd, selection, scroll) are
+  // preserved exactly.
   const activeTab = $derived(
-    explorerTabs.find((t) => t.id === $activeTabId) ?? null,
+    explorerTabs.find((t) => t.id === $activeTabId) ??
+      explorerTabs[explorerTabs.length - 1] ??
+      null,
   );
   const activeTabKey = $derived(activeTab?.key ?? null);
 

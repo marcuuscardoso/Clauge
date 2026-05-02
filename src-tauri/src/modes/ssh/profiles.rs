@@ -22,8 +22,10 @@ pub async fn ssh_create_profile(
     key_path: Option<String>,
     accent_color: Option<String>,
     secret: Option<String>,
+    jump_profile_id: Option<String>,
+    proxy_command: Option<String>,
 ) -> Result<SshProfile, String> {
-    if auth_type != "key" && auth_type != "password" && auth_type != "agent" {
+    if !matches!(auth_type.as_str(), "key" | "password" | "agent" | "interactive") {
         return Err(format!("invalid auth_type: {}", auth_type));
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -40,6 +42,8 @@ pub async fn ssh_create_profile(
         key_path.as_deref(),
         accent_color.as_deref(),
         &now,
+        jump_profile_id.as_deref(),
+        proxy_command.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -58,7 +62,16 @@ pub async fn ssh_create_profile(
         .map_err(|e| e.to_string())
 }
 
+/// Update profile fields. Each `Option<T>` follows the existing
+/// "send-or-leave-alone" convention: `Some(value)` updates, `None`
+/// leaves the column untouched.
+///
+/// For `jump_profile_id` and `proxy_command`, sending an empty string
+/// clears the field (the connect path treats empty as "no proxy" — see
+/// ssh_session::open_authenticated_ssh_session). Sending the field as
+/// `null`/omitted leaves the existing value untouched.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ssh_update_profile(
     pool: State<'_, SqlitePool>,
     id: String,
@@ -70,6 +83,8 @@ pub async fn ssh_update_profile(
     key_path: Option<String>,
     accent_color: Option<String>,
     secret: Option<String>,
+    jump_profile_id: Option<String>,
+    proxy_command: Option<String>,
 ) -> Result<SshProfile, String> {
     if let Some(ref n) = name {
         ssh_profiles_repo::update_name(pool.inner(), &id, n)
@@ -92,7 +107,7 @@ pub async fn ssh_update_profile(
             .map_err(|e| e.to_string())?;
     }
     if let Some(ref a) = auth_type {
-        if a != "key" && a != "password" && a != "agent" {
+        if !matches!(a.as_str(), "key" | "password" | "agent" | "interactive") {
             return Err(format!("invalid auth_type: {}", a));
         }
         ssh_profiles_repo::update_auth_type(pool.inner(), &id, a)
@@ -119,6 +134,23 @@ pub async fn ssh_update_profile(
                 .await
                 .map_err(|e| format!("credential store: {}", e))?;
         }
+    }
+    // Some(value) updates the column; None leaves it alone. Empty string is
+    // stored as-is — the connect path filters empty strings as "no proxy"
+    // (since OpenSSH itself can't have a meaningful empty proxy config).
+    if let Some(ref jump) = jump_profile_id {
+        // Treat empty string as explicit clear (NULL the column) so the
+        // foreign-key SET NULL semantics work cleanly.
+        let val = if jump.is_empty() { None } else { Some(jump.as_str()) };
+        ssh_profiles_repo::update_jump_profile_id(pool.inner(), &id, val)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(ref cmd) = proxy_command {
+        let val = if cmd.is_empty() { None } else { Some(cmd.as_str()) };
+        ssh_profiles_repo::update_proxy_command(pool.inner(), &id, val)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     ssh_profiles_repo::get_by_id(pool.inner(), &id)

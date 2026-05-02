@@ -43,6 +43,18 @@
   let revealSecret = $state(false);
   let loading = $state(false);
 
+  // Connection routing: how to reach the host.
+  //   'direct'  → straight TCP (the default)
+  //   'jump'    → tunnel through another saved profile (OpenSSH ProxyJump)
+  //   'command' → spawn a subprocess as the transport (OpenSSH ProxyCommand)
+  // Stored on the profile via jumpProfileId / proxyCommand. Mutually exclusive
+  // at the UI level; if both are set on a row (e.g. from import), the connect
+  // path uses ProxyCommand (matches OpenSSH precedence).
+  type ConnectionMode = 'direct' | 'jump' | 'command';
+  let connectionMode = $state<ConnectionMode>('direct');
+  let jumpProfileId = $state<string>('');
+  let proxyCommand = $state('');
+
   async function pickKeyFile() {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
@@ -65,7 +77,7 @@
   async function handleCreate() {
     if (!host.trim() || !username.trim() || !name.trim()) return;
     if (authType === 'key' && !keyPath.trim()) return;
-    if (authType === 'password' && !password) return;
+    // 'password': empty password is OK — modal will prompt at connect time.
     // 'agent' has no profile-side requirements — keys live in ssh-agent.
 
     loading = true;
@@ -78,9 +90,12 @@
         authType,
         keyPath: authType === 'key' ? keyPath.trim() : null,
         accentColor: null,
-        secret: authType === 'password' ? password : null,
+        secret: authType === 'password' && password ? password : null,
         passphrase: authType === 'key' && passphrase ? passphrase : null,
         // ssh-agent profiles store nothing locally — agent holds the key.
+        jumpProfileId: connectionMode === 'jump' && jumpProfileId ? jumpProfileId : null,
+        proxyCommand:
+          connectionMode === 'command' && proxyCommand.trim() ? proxyCommand.trim() : null,
       });
       await loadSshProfiles();
       window.dispatchEvent(new CustomEvent(SSH_EVENT.PROFILE_CREATED, { detail: profile }));
@@ -115,6 +130,9 @@
     passphrase = '';
     password = '';
     revealSecret = false;
+    connectionMode = 'direct';
+    jumpProfileId = '';
+    proxyCommand = '';
   }
 
   // Duplicate-name check (case-insensitive trim) against the existing list.
@@ -195,8 +213,10 @@
       !nameDuplicate &&
       host.trim() !== '' &&
       username.trim() !== '' &&
+      // 'password' allows an empty password — the prompt modal collects
+      // it at connect time (same UX as VS Code / Zed / `ssh`).
       ((authType === 'key' && keyPath.trim() !== '') ||
-        (authType === 'password' && password !== '') ||
+        authType === 'password' ||
         authType === 'agent')
   );
 </script>
@@ -289,13 +309,13 @@
       </label>
     {:else}
       <label class="ns-field">
-        <span class="ns-label">Password</span>
+        <span class="ns-label">Password <span class="ns-optional">(optional)</span></span>
         <div class="ns-path-row">
           <input
             class="ns-input ns-path-input"
             type={revealSecret ? 'text' : 'password'}
             bind:value={password}
-            placeholder="••••••••"
+            placeholder="Leave blank to enter at connect time"
             autocomplete="off"
           />
           <button class="ns-btn-browse" type="button" onclick={() => (revealSecret = !revealSecret)}>
@@ -303,11 +323,62 @@
           </button>
         </div>
       </label>
+      <span class="ns-optional">
+        If your server uses multi-step auth (password + OTP), you'll be prompted for the additional
+        steps each time you connect.
+      </span>
     {/if}
 
     <p class="ns-helper">
       Secrets are stored in your system keychain — not in the Clauge database.
     </p>
+
+    <!-- Connection routing — mutually exclusive at the UI level. Stored as
+         either jumpProfileId (ProxyJump) or proxyCommand (ProxyCommand). -->
+    <div class="ns-field">
+      <span class="ns-label">Connection</span>
+      <div class="ns-radio-row">
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <span class="ns-chip" class:selected={connectionMode === 'direct'} onclick={() => (connectionMode = 'direct')}>Direct</span>
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <span class="ns-chip" class:selected={connectionMode === 'jump'} onclick={() => (connectionMode = 'jump')}>Through SSH jump host</span>
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <span class="ns-chip" class:selected={connectionMode === 'command'} onclick={() => (connectionMode = 'command')}>Through proxy command</span>
+      </div>
+    </div>
+
+    {#if connectionMode === 'jump'}
+      <label class="ns-field">
+        <span class="ns-label">Jump Host</span>
+        <select class="ns-input" bind:value={jumpProfileId}>
+          <option value="">— Select a profile —</option>
+          {#each $sshProfiles as p (p.id)}
+            <option value={p.id}>{p.name}</option>
+          {/each}
+        </select>
+        <span class="ns-optional">
+          The SSH session connects to this profile first, then opens a tunneled channel to the destination.
+          For multi-hop chains, set the jump profile's own jump host.
+        </span>
+      </label>
+    {:else if connectionMode === 'command'}
+      <label class="ns-field">
+        <span class="ns-label">Proxy Command</span>
+        <input
+          class="ns-input"
+          type="text"
+          bind:value={proxyCommand}
+          placeholder="cloudflared access ssh --hostname %h"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <span class="ns-optional">
+          Spawned as a subprocess that proxies SSH bytes via stdin/stdout. Supports <code>%h</code> (host),
+          <code>%p</code> (port), <code>%r</code> (username) placeholders. Tokenized as argv — does NOT
+          run through a shell. For pipes or shell features, wrap in a script and point this at the script.
+        </span>
+      </label>
+    {/if}
 
     <div class="ns-actions">
       <button class="ns-btn-cancel" onclick={() => { show = false; resetForm(); }}>Cancel</button>
@@ -361,6 +432,11 @@
                 {h.user ? `${h.user}@` : ''}{h.hostname}{h.port !== 22 ? `:${h.port}` : ''}
                 {#if h.identityFile}
                   <span class="ic-dim"> · key: {h.identityFile}</span>
+                {/if}
+                {#if h.proxyCommand}
+                  <span class="ic-badge ic-badge-proxy">via cmd</span>
+                {:else if h.proxyJumpAliases.length > 0}
+                  <span class="ic-badge ic-badge-proxy">via {h.proxyJumpAliases.join(' → ')}</span>
                 {/if}
               </div>
             </div>
