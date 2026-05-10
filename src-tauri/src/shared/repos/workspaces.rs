@@ -904,6 +904,72 @@ pub async fn count_notes_in_workspace(
     Ok(row.0)
 }
 
+pub async fn count_boards_in_workspace(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM workspace_boards WHERE workspace_id = ?",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// One row per claimed card in the workspace whose claim points at a
+/// session with a non-empty `worktree_path`. Used by the workspace
+/// delete confirmation: cascade alone removes the card row and nulls
+/// the FK to the session, but the worktree on disk + its git branch
+/// would leak. Caller batches `agent_remove_worktree` for each.
+pub async fn list_active_worktrees_in_workspace(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<ActiveWorktree>, sqlx::Error> {
+    sqlx::query_as::<_, ActiveWorktree>(
+        "SELECT c.id AS card_id, c.title AS card_title, \
+                s.id AS session_id, s.project_path, \
+                s.worktree_path, s.worktree_branch \
+         FROM workspace_board_cards c \
+         JOIN workspace_board_columns col ON col.id = c.column_id \
+         JOIN workspace_boards b ON b.id = col.board_id \
+         JOIN agent_sessions s ON s.id = c.claimed_session_id \
+         WHERE b.workspace_id = ? \
+           AND s.worktree_path IS NOT NULL \
+           AND TRIM(s.worktree_path) != ''",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveWorktree {
+    pub card_id: String,
+    pub card_title: String,
+    pub session_id: String,
+    pub project_path: String,
+    pub worktree_path: Option<String>,
+    pub worktree_branch: Option<String>,
+}
+
+/// Null out the worktree pointers on an agent_session row. Called
+/// after a successful `agent_remove_worktree` so the next view of
+/// the session doesn't show a phantom branch / path.
+pub async fn clear_session_worktree(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE agent_sessions SET worktree_path = NULL, worktree_branch = NULL WHERE id = ?",
+    )
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn count_review_pending_in_board(
     pool: &SqlitePool,
     board_id: &str,

@@ -251,8 +251,8 @@ export async function updateWorkspace(params: {
   await loadWorkspaces();
 }
 
-export async function deleteWorkspace(id: string) {
-  await cmd.workspaceDelete(id);
+export async function deleteWorkspace(id: string, deleteWorktrees: boolean = true) {
+  await cmd.workspaceDelete(id, deleteWorktrees);
   // Clear active before the list refresh so the UI doesn't briefly
   // render a workspace that no longer exists.
   if (get(activeWorkspaceId) === id) {

@@ -28,7 +28,28 @@ export const workspaceUpdate = (params: {
   color?: string | null;
   actor: string;
 }) => invoke<void>('workspace_update', params);
-export const workspaceDelete = (id: string) => invoke<void>('workspace_delete', { id });
+export const workspaceDelete = (id: string, deleteWorktrees: boolean = true) =>
+  invoke<void>('workspace_delete', { id, deleteWorktrees });
+
+/** Pre-delete summary for the confirmation dialog. `activeWorktrees`
+ *  enumerates cards whose claimed session has a worktree on disk —
+ *  those need cleanup beyond the DB cascade. */
+export interface ActiveWorktreeRow {
+  cardId: string;
+  cardTitle: string;
+  sessionId: string;
+  projectPath: string;
+  worktreePath: string | null;
+  worktreeBranch: string | null;
+}
+export interface WorkspaceDeletePreviewResult {
+  noteCount: number;
+  boardCount: number;
+  cardCount: number;
+  activeWorktrees: ActiveWorktreeRow[];
+}
+export const workspaceDeletePreview = (id: string) =>
+  invoke<WorkspaceDeletePreviewResult>('workspace_delete_preview', { id });
 
 // ── Notes ─────────────────────────────────────────────────────────────
 

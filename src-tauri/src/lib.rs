@@ -427,6 +427,7 @@ pub fn run() {
             modes::workspace::commands::workspace_create,
             modes::workspace::commands::workspace_update,
             modes::workspace::commands::workspace_delete,
+            modes::workspace::commands::workspace_delete_preview,
             modes::workspace::commands::workspace_note_list,
             modes::workspace::commands::workspace_note_get,
             modes::workspace::commands::workspace_note_create,

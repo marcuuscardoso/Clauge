@@ -19,7 +19,12 @@
     updateWorkspace,
     inboxOpen,
   } from '../stores';
-  import { workspaceNoteCreate, workspaceBoardCreate } from '../commands';
+  import {
+    workspaceNoteCreate,
+    workspaceBoardCreate,
+    workspaceDeletePreview,
+    type WorkspaceDeletePreviewResult,
+  } from '../commands';
   import { currentUserActor } from '../attribution';
   import type { Workspace, WorkspaceNote, WorkspaceBoard } from '../types';
   import { showContextMenu } from '$lib/shared/primitives/contextmenu';
@@ -42,6 +47,8 @@
   let addingKind = $state<'note' | 'board' | null>(null);
   let renaming = $state(false);
   let showDeleteConfirm = $state(false);
+  let deletePreview = $state<WorkspaceDeletePreviewResult | null>(null);
+  let deleteWorktrees = $state(true);
 
   const isActive = $derived($activeWorkspaceId === workspace.id);
   const notes = $derived($notesByWorkspace.get(workspace.id) ?? []);
@@ -184,7 +191,7 @@
         label: 'Delete Workspace',
         danger: true,
         icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>',
-        action: () => { showDeleteConfirm = true; },
+        action: openDeleteConfirm,
       },
     ];
   }
@@ -205,6 +212,22 @@
     }
   }
 
+  async function openDeleteConfirm() {
+    // Reset the checkbox to default-on every time the dialog opens —
+    // a previous "off" toggle on a different workspace shouldn't carry
+    // over to this one.
+    deleteWorktrees = true;
+    deletePreview = null;
+    showDeleteConfirm = true;
+    try {
+      deletePreview = await workspaceDeletePreview(workspace.id);
+    } catch (e) {
+      // Preview failure is non-fatal — the dialog falls back to the
+      // generic message and still allows confirm.
+      console.warn('workspace delete preview failed', e);
+    }
+  }
+
   async function confirmDelete() {
     try {
       // Close any open tabs for items in this workspace.
@@ -214,7 +237,10 @@
       ]);
       const tabsToClose = get(sharedTabs).filter(t => t.mode === 'workspace' && t.key && myKeys.has(t.key));
       tabsToClose.forEach(t => closeTab(t.id));
-      await deleteWorkspace(workspace.id);
+      const hasWorktrees = (deletePreview?.activeWorktrees.length ?? 0) > 0;
+      // Only forward the flag when there's actually something to clean —
+      // skips the no-op worktree-walk path on empty workspaces.
+      await deleteWorkspace(workspace.id, hasWorktrees && deleteWorktrees);
       showToast(`Deleted "${workspace.name}"`, 'success');
     } catch (e) {
       showToast(`Delete failed: ${e}`, 'error');
@@ -371,10 +397,33 @@
 <ConfirmDialog
   bind:show={showDeleteConfirm}
   title="Delete workspace"
-  message={`Delete "${workspace.name}"? All notes and boards inside will be removed. This cannot be undone.`}
+  message={deletePreview
+    ? `Delete "${workspace.name}"? This will remove ${deletePreview.noteCount} note${deletePreview.noteCount === 1 ? '' : 's'}, ${deletePreview.boardCount} board${deletePreview.boardCount === 1 ? '' : 's'}, and ${deletePreview.cardCount} card${deletePreview.cardCount === 1 ? '' : 's'}. This cannot be undone.`
+    : `Delete "${workspace.name}"? All notes and boards inside will be removed. This cannot be undone.`}
   confirmText="Delete"
   onconfirm={confirmDelete}
-/>
+>
+  {#snippet extra()}
+    {#if deletePreview && deletePreview.activeWorktrees.length > 0}
+      <label class="ws-del-wt">
+        <input type="checkbox" bind:checked={deleteWorktrees} />
+        <span>
+          Remove the {deletePreview.activeWorktrees.length} active git worktree{deletePreview.activeWorktrees.length === 1 ? '' : 's'} from disk too
+        </span>
+      </label>
+      <ul class="ws-del-wt-list">
+        {#each deletePreview.activeWorktrees as wt (wt.cardId)}
+          <li>
+            <span class="ws-del-wt-card">{wt.cardTitle}</span>
+            {#if wt.worktreeBranch}
+              <span class="ws-del-wt-branch">· {wt.worktreeBranch}</span>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  {/snippet}
+</ConfirmDialog>
 
 <style>
   .ncoll {
@@ -571,5 +620,31 @@
     font-size: 11px;
     font-style: italic;
     font-family: var(--ui);
+  }
+
+  .ws-del-wt {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--t1);
+  }
+  .ws-del-wt input { margin: 0; }
+  .ws-del-wt-list {
+    margin: 8px 0 0;
+    padding: 0 0 0 24px;
+    list-style: disc;
+    font-size: 11px;
+    color: var(--t3);
+    max-height: 120px;
+    overflow-y: auto;
+  }
+  .ws-del-wt-list li { padding: 2px 0; }
+  .ws-del-wt-card { color: var(--t2); }
+  .ws-del-wt-branch {
+    font-family: var(--mono);
+    color: var(--t4);
+    margin-left: 4px;
   }
 </style>

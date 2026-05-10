@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, type Snippet } from 'svelte';
 
   interface Props {
     show: boolean;
@@ -12,6 +12,10 @@
      *  by REST/SQL "save before close" prompts so they don't have to roll
      *  their own dialog markup. */
     discardText?: string;
+    /** Optional snippet rendered below the message. Use for things like
+     *  a checkbox toggle ("Remove worktrees too") on a delete dialog
+     *  without forking the whole primitive. */
+    extra?: Snippet;
     onconfirm?: () => void;
     oncancel?: () => void;
     ondiscard?: () => void;
@@ -24,6 +28,7 @@
     confirmText = 'Delete',
     confirmColor = 'var(--err)',
     discardText,
+    extra,
     onconfirm,
     oncancel,
     ondiscard,
@@ -87,7 +92,12 @@
       <div class="q-modal-hdr">
         <span class="q-modal-title">{title}</span>
       </div>
-      <div class="q-confirm-body">{message}</div>
+      <div class="q-confirm-body">
+        {message}
+        {#if extra}
+          <div class="q-confirm-extra">{@render extra()}</div>
+        {/if}
+      </div>
       <div class="q-confirm-actions">
         <button class="q-confirm-cancel" onclick={cancel}>Cancel</button>
         {#if discardText}
@@ -158,6 +168,12 @@
     font-size: 13px;
     color: var(--t2);
     line-height: 1.5;
+  }
+
+  .q-confirm-extra {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--b1);
   }
 
   .q-confirm-actions {

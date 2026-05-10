@@ -272,12 +272,62 @@ pub async fn workspace_update(
     .map_err(|e| e.to_string())
 }
 
+/// Pre-delete summary surfaced in the confirmation dialog. Cards
+/// with active worktrees are listed individually so the user can see
+/// what's about to be cleaned up off-disk.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDeletePreview {
+    pub note_count: i64,
+    pub board_count: i64,
+    pub card_count: i64,
+    pub active_worktrees: Vec<repo::ActiveWorktree>,
+}
+
+#[tauri::command]
+pub async fn workspace_delete_preview(
+    pool: State<'_, SqlitePool>,
+    id: String,
+) -> Result<WorkspaceDeletePreview, String> {
+    let pool = pool.inner();
+    let note_count = repo::count_notes_in_workspace(pool, &id).await.map_err(|e| e.to_string())?;
+    let board_count = repo::count_boards_in_workspace(pool, &id).await.map_err(|e| e.to_string())?;
+    let card_count = repo::count_cards_in_workspace(pool, &id).await.map_err(|e| e.to_string())?;
+    let active_worktrees = repo::list_active_worktrees_in_workspace(pool, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(WorkspaceDeletePreview { note_count, board_count, card_count, active_worktrees })
+}
+
 #[tauri::command]
 pub async fn workspace_delete(
     pool: State<'_, SqlitePool>,
     id: String,
+    delete_worktrees: Option<bool>,
 ) -> Result<(), String> {
-    repo::delete_workspace(pool.inner(), &id)
+    let pool = pool.inner();
+    // Best-effort worktree cleanup BEFORE the cascade. Failures are
+    // logged but never block the delete — orphaned worktrees can be
+    // cleaned by hand, an undeleted workspace is a worse UX.
+    if delete_worktrees.unwrap_or(true) {
+        let active = repo::list_active_worktrees_in_workspace(pool, &id)
+            .await
+            .map_err(|e| e.to_string())?;
+        for w in active {
+            let wt_path = match w.worktree_path.as_ref().filter(|p| !p.trim().is_empty()) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let proj = w.project_path.clone();
+            let session_id = w.session_id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::modes::agent::worktree::agent_remove_worktree(proj, wt_path)
+            })
+            .await;
+            let _ = repo::clear_session_worktree(pool, &session_id).await;
+        }
+    }
+    repo::delete_workspace(pool, &id)
         .await
         .map_err(|e| e.to_string())
 }
