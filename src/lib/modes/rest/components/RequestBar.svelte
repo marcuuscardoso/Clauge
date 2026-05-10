@@ -64,8 +64,16 @@
     }
   });
 
-  const method = $derived($activeRequest?.method ?? localMethod);
-  const url = $derived($activeRequest?.url ?? localUrl);
+  // Only use $activeRequest for display when it actually matches the active
+  // tab's saved key — prevents stale saved-request data leaking into unsaved
+  // tabs (and vice-versa) during the async window between tab switch and
+  // loadRequest / clearActiveRequest completing.
+  const activeRestTab = $derived($tabs.find(t => t.id === $activeTabId && t.mode === 'rest'));
+  const reqMatchesTab = $derived(
+    !!activeRestTab?.key && $activeRequest?.id === activeRestTab.key
+  );
+  const method = $derived(reqMatchesTab ? $activeRequest!.method : localMethod);
+  const url    = $derived(reqMatchesTab ? $activeRequest!.url    : localUrl);
   const activeMethodColors = METHOD_COLORS;
   const methodColor = $derived(activeMethodColors[method] ?? activeMethodColors.GET);
 
@@ -213,13 +221,15 @@
     return result;
   }
 
-  // Sync value changes into the editor (only for saved requests when URL changes externally)
+  // Sync value changes into the editor — only when the loaded request
+  // matches the active tab's key, so a stale $activeRequest can't overwrite
+  // an unsaved tab's URL that the user is typing.
   $effect(() => {
     const v = url;
     const el = editorEl;
     const req = $activeRequest;
-    // Only re-render for saved requests — unsaved tabs are handled by handleInput
-    if (!suppressRender && el && req) {
+    const tab = activeRestTab;
+    if (!suppressRender && el && req && tab?.key && req.id === tab.key) {
       renderToEditor(v);
     }
   });

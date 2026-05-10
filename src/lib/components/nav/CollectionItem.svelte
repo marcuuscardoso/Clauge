@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Collection, Request } from '$lib/types';
   import { activeCollectionId, deleteCollection, updateCollection, createRequest, loadCollections, loadRequest, collectionsRefreshTrigger } from '$lib/modes/rest/stores';
-  import { tabs, addTab, activateTab } from '$lib/shared/stores/tabs';
+  import { tabs, addTab, activateTab, closeTab } from '$lib/shared/stores/tabs';
   import { METHOD_COLORS } from '$lib/utils/theme';
   import { get } from 'svelte/store';
   import { showContextMenu } from '$lib/shared/primitives/contextmenu';
@@ -27,7 +27,8 @@
   let renaming = $state(false);
   let showDeleteConfirm = $state(false);
   let dragOverReqIndex = $state<number | null>(null);
-  let isDragging = $state(false);
+  let isDragTargeted = $state(false);
+  let hoverExpandTimer: ReturnType<typeof setTimeout> | null = null;
 
   const isActive = $derived($activeCollectionId === collection.id);
 
@@ -172,6 +173,13 @@
 
   async function handleDeleteCollection() {
     try {
+      // Close any open topbar tabs for this collection's requests before
+      // the backend deletes them, so users aren't left with orphaned tabs.
+      const allTabs = get(tabs);
+      for (const req of requests) {
+        const tab = allTabs.find(t => t.mode === 'rest' && t.key === req.id);
+        if (tab) closeTab(tab.id);
+      }
       await deleteCollection(collection.id);
       showToast('Collection deleted', 'success');
       ondeleted?.();
@@ -184,16 +192,48 @@
     await loadRequests();
   }
 
-  // Drag & drop for the collection header
-  function handleDragStart(e: DragEvent) {
-    if (!e.dataTransfer) return;
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/collection-id', collection.id);
-    isDragging = true;
+  // Drag & drop for the collection header — accept request drags, auto-expand on hover
+  function handleHeaderDragOver(e: DragEvent) {
+    const types = e.dataTransfer?.types ?? [];
+    if (!types.includes('text/request-id')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    isDragTargeted = true;
+    if (!expanded && !hoverExpandTimer) {
+      hoverExpandTimer = setTimeout(() => {
+        expanded = true;
+        if (!loaded) loadRequests();
+        hoverExpandTimer = null;
+      }, 500);
+    }
   }
 
-  function handleDragEnd() {
-    isDragging = false;
+  function handleHeaderDragLeave(e: DragEvent) {
+    const related = e.relatedTarget as HTMLElement | null;
+    const hdr = e.currentTarget as HTMLElement;
+    if (related && hdr.contains(related)) return;
+    isDragTargeted = false;
+    if (hoverExpandTimer) { clearTimeout(hoverExpandTimer); hoverExpandTimer = null; }
+  }
+
+  async function handleHeaderDrop(e: DragEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    isDragTargeted = false;
+    if (hoverExpandTimer) { clearTimeout(hoverExpandTimer); hoverExpandTimer = null; }
+    const sourceReqId = e.dataTransfer?.getData('text/request-id');
+    const sourceCollId = e.dataTransfer?.getData('text/request-collection-id');
+    if (!sourceReqId || sourceCollId === collection.id) return;
+    try {
+      await cmd.moveRequest(sourceReqId, collection.id);
+      showToast('Request moved', 'success');
+      if (!expanded) { expanded = true; }
+      await loadRequests();
+      await loadCollections();
+    } catch (err) {
+      showToast('Failed to move request', 'error');
+    }
   }
 
   // Drag & drop for requests within this collection
@@ -270,19 +310,17 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="ncoll" class:dragging={isDragging}>
+<div class="ncoll">
   <div
     class="ncoll-hdr"
     class:active={isActive}
+    class:drag-target={isDragTargeted}
     onclick={toggle}
     oncontextmenu={handleContextMenu}
-    draggable="true"
-    ondragstart={handleDragStart}
-    ondragend={handleDragEnd}
+    ondragover={handleHeaderDragOver}
+    ondragleave={handleHeaderDragLeave}
+    ondrop={handleHeaderDrop}
   >
-    <div class="drag-handle" title="Drag to reorder">
-      <svg viewBox="0 0 24 24" width="10" height="10"><circle cx="8" cy="6" r="1.5" fill="currentColor"/><circle cx="16" cy="6" r="1.5" fill="currentColor"/><circle cx="8" cy="12" r="1.5" fill="currentColor"/><circle cx="16" cy="12" r="1.5" fill="currentColor"/><circle cx="8" cy="18" r="1.5" fill="currentColor"/><circle cx="16" cy="18" r="1.5" fill="currentColor"/></svg>
-    </div>
     <div class="coll-icon coll-icon-accent">
       <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
     </div>
@@ -358,9 +396,6 @@
     border-bottom: 1px solid var(--b1);
     transition: opacity 0.15s;
   }
-  .ncoll.dragging {
-    opacity: 0.4;
-  }
   .ncoll-hdr {
     min-height: 44px;
     padding: 6px 8px;
@@ -401,25 +436,10 @@
   .ncoll-hdr.active {
     background: var(--n2);
   }
-  .drag-handle {
-    width: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--t4);
-    flex-shrink: 0;
-    cursor: grab;
-    opacity: 0.3;
-    transition: opacity 0.15s, color 0.15s;
-  }
-  .ncoll-hdr:hover .drag-handle {
-    opacity: 0.7;
-  }
-  .drag-handle:hover {
-    color: var(--t2);
-  }
-  .drag-handle:active {
-    cursor: grabbing;
+  .ncoll-hdr.drag-target {
+    background: color-mix(in srgb, var(--acc) 10%, var(--n2));
+    outline: 1px solid color-mix(in srgb, var(--acc) 40%, transparent);
+    outline-offset: -1px;
   }
   .coll-icon {
     width: 22px;

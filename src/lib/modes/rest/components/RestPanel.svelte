@@ -111,8 +111,11 @@
     // Don't allow concurrent sends on the same tab.
     if (loadingCache.get(tabId)) return;
 
-    const reqId = get(activeRequestId);
-    const req = get(activeRequest);
+    // Use the tab's own key as the authoritative source of truth for whether
+    // this is a saved request — avoids stale activeRequestId if the store
+    // hasn't settled yet after a rapid tab switch.
+    const tab = get(tabs).find(t => t.id === tabId && t.mode === 'rest');
+    const reqId = tab?.key ?? null;
 
     loadingCache.set(tabId, true);
     responseCache.set(tabId, null);
@@ -123,7 +126,7 @@
 
     let resp: HttpResponse | null = null;
     try {
-      if (reqId && req) {
+      if (reqId) {
         // Saved request — commit any dirty changes before executing
         const draft = getDraft(tabId);
         if (draft) {

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { Request, Collection } from '$lib/types';
+  import type { Request } from '$lib/types';
   import { METHOD_COLORS } from '$lib/utils/theme';
-  import { activeRequestId, activeCollectionId, loadRequest, deleteRequest, collections, loadCollections } from '$lib/modes/rest/stores';
+  import { activeRequestId, activeCollectionId, loadRequest, deleteRequest } from '$lib/modes/rest/stores';
   import { tabs, activeTabId, addTab, activateTab, updateTab } from '$lib/shared/stores/tabs';
   import { showContextMenu } from '$lib/shared/primitives/contextmenu';
   import { showToast } from '$lib/shared/primitives/toast';
@@ -44,25 +44,6 @@
   }
 
   function buildMenuItems() {
-    const collList: Collection[] = [];
-    collections.subscribe(c => { collList.push(...c); })();
-
-    const moveItems = collList
-      .filter(c => c.id !== request.collectionId)
-      .map(c => ({
-        label: c.name,
-        action: async () => {
-          try {
-            await cmd.moveRequest(request.id, c.id);
-            ondeleted?.();
-            await loadCollections();
-            showToast(`Moved to ${c.name}`, 'success');
-          } catch (err) {
-            showToast('Failed to move request', 'error');
-          }
-        },
-      }));
-
     return [
       {
         label: 'Rename',
@@ -95,14 +76,6 @@
           }
         },
       },
-      ...(moveItems.length > 0 ? [
-        { label: '', action: () => {}, separator: true },
-        ...moveItems.map(item => ({
-          label: `Move to ${item.label}`,
-          icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>',
-          action: item.action,
-        })),
-      ] : []),
       { label: '', action: () => {}, separator: true },
       {
         label: 'Delete',
@@ -132,6 +105,11 @@
     try {
       await cmd.updateRequest(request.id, { name: newName });
       request.name = newName;
+      // Keep the topbar tab label in sync with the new name.
+      const openTab = get(tabs).find(t => t.mode === 'rest' && t.key === request.id);
+      if (openTab) {
+        updateTab(openTab.id, { label: `${request.method} ${newName}` });
+      }
       showToast('Request renamed', 'success');
     } catch (err) {
       showToast('Failed to rename request', 'error');

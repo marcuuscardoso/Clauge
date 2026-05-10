@@ -86,6 +86,10 @@ export async function deleteRequest(id: string) {
   if (get(activeRequestId) === id) {
     activeRequestId.set(null);
   }
+  // Close the topbar tab for this request so the user isn't left staring
+  // at a tab pointing to a non-existent request.
+  const openTab = get(sharedTabs).find(t => t.mode === 'rest' && t.key === id);
+  if (openTab) sharedCloseTab(openTab.id);
 }
 
 export async function saveRequest(id: string, data: RequestUpdate) {

@@ -3,7 +3,6 @@
   import { showToast } from '$lib/shared/primitives/toast';
   import CollectionItem from './CollectionItem.svelte';
   import InlineInput from './InlineInput.svelte';
-  import * as cmd from '$lib/commands';
 
   interface Props {
     searchQuery?: string;
@@ -12,7 +11,6 @@
   let { searchQuery = '' }: Props = $props();
 
   let addingCollection = $state(false);
-  let dragOverIndex = $state<number | null>(null);
 
   const filteredCollections = $derived(
     searchQuery
@@ -44,42 +42,6 @@
     await loadCollections();
   }
 
-  function handleDragOver(e: DragEvent, index: number) {
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-    dragOverIndex = index;
-  }
-
-  function handleDragLeave() {
-    dragOverIndex = null;
-  }
-
-  async function handleDrop(e: DragEvent, targetIndex: number) {
-    e.preventDefault();
-    dragOverIndex = null;
-
-    const sourceId = e.dataTransfer?.getData('text/collection-id');
-    if (!sourceId) return;
-
-    const currentList = [...$collections];
-    const sourceIndex = currentList.findIndex(c => c.id === sourceId);
-    if (sourceIndex === -1 || sourceIndex === targetIndex) return;
-
-    // Reorder locally
-    const [moved] = currentList.splice(sourceIndex, 1);
-    currentList.splice(targetIndex, 0, moved);
-
-    // Update store immediately for snappy UI
-    collections.set(currentList);
-
-    // Persist to backend
-    try {
-      await cmd.reorderCollections(currentList.map(c => c.id));
-    } catch (err) {
-      showToast('Failed to reorder', 'error');
-      await loadCollections(); // rollback
-    }
-  }
 </script>
 
 <div class="rest-nav">
@@ -95,21 +57,12 @@
       {/if}
     </div>
   {:else}
-    {#each filteredCollections as coll, i (coll.id)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="coll-drop-zone"
-        class:drop-above={dragOverIndex === i}
-        ondragover={(e) => handleDragOver(e, i)}
-        ondragleave={handleDragLeave}
-        ondrop={(e) => handleDrop(e, i)}
-      >
-        <CollectionItem
-          collection={coll}
-          {searchQuery}
-          ondeleted={handleCollectionDeleted}
-        />
-      </div>
+    {#each filteredCollections as coll (coll.id)}
+      <CollectionItem
+        collection={coll}
+        {searchQuery}
+        ondeleted={handleCollectionDeleted}
+      />
     {/each}
   {/if}
   {#if addingCollection}
@@ -160,18 +113,5 @@
     padding: 8px 10px;
     border-bottom: 1px solid var(--b1);
   }
-  .coll-drop-zone {
-    position: relative;
-  }
-  .coll-drop-zone.drop-above::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 8px;
-    right: 8px;
-    height: 2px;
-    background: var(--acc);
-    border-radius: 1px;
-    z-index: 10;
-  }
+
 </style>
