@@ -204,12 +204,19 @@ const GOOGLE_CLIENT_ID: &str =
     "361959797138-ahsfia59q9cf6h6njln6qt26jk763jp7.apps.googleusercontent.com";
 
 pub fn github_oauth_url() -> String {
-    // No scope — we only need public user info. Dropping the prior `scope=gist`
-    // grant is a privacy win.
+    // `user:email` is the minimum scope that lets the worker call
+    // `/user/emails` and resolve the user's primary verified email. Without
+    // it, GitHub's `/user` endpoint returns `email: null` whenever a user
+    // keeps their email private (which is the default since 2017) — the
+    // Avatar + CloudConnect modal then have no identity to show. The
+    // narrower `user:email` scope does NOT grant repo or gist access, so
+    // this is still a privacy win over the prior `scope=gist` we used in
+    // earlier versions.
     format!(
-        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}",
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope={}",
         GITHUB_CLIENT_ID,
         urlencoding::encode("https://clauge.in/auth/callback"),
+        urlencoding::encode("user:email"),
     )
 }
 
