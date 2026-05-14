@@ -256,10 +256,16 @@
             oncontextmenu={(e) => showSessionMenu(e, session)}
           >
             <span class="session-icon">
-              {#if activity === 'running'}
-                <img src="/code-in-action.svg" alt="" width="36" height="26" />
+              {#if session.provider === 'codex'}
+                <img src="/codex.svg" alt="Codex" width="22" height="22" class="session-icon-img codex" />
+              {:else if session.provider === 'gemini'}
+                <img src="/gemini.svg" alt="Gemini" width="22" height="22" class="session-icon-img gemini" />
+              {:else if session.provider === 'opencode'}
+                <img src="/opencode-dark.svg" alt="OpenCode" width="22" height="22" class="session-icon-img opencode" />
+              {:else if activity === 'running'}
+                <img src="/code-in-action.svg" alt="Claude" width="36" height="26" />
               {:else}
-                <img src="/code-no-action.svg" alt="" width="22" height="22" />
+                <img src="/code-no-action.svg" alt="Claude" width="22" height="22" />
               {/if}
             </span>
             <div class="session-body">
@@ -496,6 +502,11 @@
     white-space: nowrap;
     line-height: 1.4;
   }
+
+  /* Per-provider session-row icon — non-Claude brand marks. The Codex
+   * mark is mono so it picks up app text colour; OpenCode's brand
+   * stripes are baked into its SVG. */
+  .session-icon-img.codex { color: var(--t1); }
 
   .session-time-spacer {
     flex: 1;

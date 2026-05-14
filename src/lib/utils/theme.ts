@@ -69,25 +69,32 @@ const themes: Record<string, Theme> = {
   'dark-glass': {
     id: 'dark-glass',
     name: 'Dark Glass',
-    description: 'Transparent with macOS vibrancy',
-    // Surfaces tuned brighter (rgb 22,22,34 vs old 12,12,20) and slightly
-    // less translucent (0.92 vs old 0.88) so the theme stays legible in
-    // daylight when the desktop behind the vibrancy isn't bright enough
-    // to lift the glass on its own. Borders bumped from 0.06/0.10 alpha to
-    // 0.10/0.16 so panel separation reads in bright ambient light.
-    sidebar: 'rgba(22,22,34,0.92)',
-    nav: 'rgba(22,22,34,0.92)',
-    navHeader: 'rgba(28,28,42,0.95)',
-    content: 'rgba(22,22,34,0.92)',
-    editor: 'rgba(22,22,34,0.92)',
-    border: 'rgba(255,255,255,0.16)',
-    borderHover: 'rgba(255,255,255,0.22)',
-    borderSubtle: 'rgba(255,255,255,0.10)',
+    description: 'Translucent with native blur',
+    // Surface alphas tuned aggressively for "wallpaper reads through,
+    // text stays legible". 0.40 puts 60% of the vibrancy / desktop
+    // bleed at the surface — visibly glassy even on a dark wallpaper.
+    // Text variables (--t*) stay at full alpha so legibility is
+    // unaffected. navHeader sits a touch denser (0.55) so the top
+    // strip reads as a deliberate header rather than blending into
+    // the content body. Borders bumped to 0.20 / 0.28 so panel
+    // separation reads through the high transparency.
+    sidebar: 'rgba(22,22,34,0.40)',
+    nav: 'rgba(22,22,34,0.40)',
+    navHeader: 'rgba(28,28,42,0.55)',
+    content: 'rgba(22,22,34,0.40)',
+    editor: 'rgba(22,22,34,0.40)',
+    border: 'rgba(255,255,255,0.20)',
+    borderHover: 'rgba(255,255,255,0.28)',
+    borderSubtle: 'rgba(255,255,255,0.12)',
     textPrimary: '#e8e8f4',
     textSecondary: '#d0d0e4',
     textMuted: '#bcbcd5',
     textFaint: '#8a8ab2',
-    modalBg: '#1a1a2c',
+    // Modals on glass theme keep enough alpha (0.78) for crisp text
+    // legibility while still letting the vibrancy underneath read
+    // through. The Modal primitive layers a backdrop-filter on top of
+    // this for the native macOS glass-card look — see Modal.svelte.
+    modalBg: 'rgba(26,26,44,0.78)',
     ok: '#1dc880',
     warn: '#f5a623',
     err: '#f04444',
@@ -423,13 +430,31 @@ export const TERMINAL_THEMES: Record<string, Record<string, string>> = {
   },
 };
 
-/** Get xterm theme for a given app theme, with accent color as cursor */
+/** Get xterm theme for a given app theme, with accent color as cursor.
+ *  For glass themes, the background is swapped to a translucent rgba
+ *  so the terminal canvas blends with the app's vibrancy chrome
+ *  instead of painting an opaque rectangle over it. Solid themes
+ *  keep their opaque hex — the terminal stays fully readable on a
+ *  solid backdrop and is unaffected by this change. */
 export function getTerminalTheme(themeId: string, accentColor?: string): Record<string, string> {
   const termTheme = TERMINAL_THEMES[themeId] || TERMINAL_THEMES['dark-glass'];
-  if (accentColor) {
-    return { ...termTheme, cursor: accentColor };
+  const appTheme = themes[themeId];
+  let background = termTheme.background;
+  if (appTheme?.glass) {
+    // Convert the opaque hex (e.g. #0d0d18) to rgba(13,13,24,0.55).
+    // 0.55 keeps terminal text crisp while letting the vibrancy
+    // bleed through enough that the panel reads as glass.
+    const hex = termTheme.background.replace('#', '');
+    if (hex.length === 6) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      background = `rgba(${r},${g},${b},0.55)`;
+    }
   }
-  return { ...termTheme };
+  const merged: Record<string, string> = { ...termTheme, background };
+  if (accentColor) merged.cursor = accentColor;
+  return merged;
 }
 
 // Method colors for HTTP methods

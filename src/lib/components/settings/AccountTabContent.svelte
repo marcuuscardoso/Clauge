@@ -266,7 +266,11 @@
                 s.loadSqlScripts(),
                 n.loadNoSqlConnections(),
             ]);
-            showToast("Restored from cloud", "success");
+            const { announceRestoreCompletion } = await import(
+                "$lib/stores/missingCredentials"
+            );
+            const shown = await announceRestoreCompletion();
+            if (!shown) showToast("Restored from cloud", "success");
         } catch (e) {
             showToast(friendlyError(e), "error");
         } finally {
@@ -377,6 +381,16 @@
             danger: true,
         },
     ]);
+
+    // Profile avatar can 404 / time out (network down, image expired,
+    // host blocked). Without this guard the <img> renders as the broken-
+    // image glyph; we'd rather fall back to the initial-letter avatar.
+    // Reset on URL change so a retry works after the network recovers.
+    let acc_avatar_failed = $state(false);
+    $effect(() => {
+        const _ = $cloudUser?.avatarUrl;
+        acc_avatar_failed = false;
+    });
 </script>
 
 <div class="acc-pane">
@@ -571,11 +585,13 @@
                 </div>
 
                 <div class="acc-profile-row">
-                    {#if $cloudUser.avatarUrl}
+                    {#if $cloudUser.avatarUrl && !acc_avatar_failed}
                         <img
                             class="acc-avatar"
                             src={$cloudUser.avatarUrl}
                             alt=""
+                            referrerpolicy="no-referrer"
+                            onerror={() => (acc_avatar_failed = true)}
                         />
                     {:else}
                         <div class="acc-avatar acc-avatar-fallback">

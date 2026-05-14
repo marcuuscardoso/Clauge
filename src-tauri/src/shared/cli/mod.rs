@@ -3,4 +3,8 @@
 // `claude.rs` for the Claude implementation.
 
 pub mod claude;
+pub mod codex;
+pub mod gemini;
+pub mod opencode;
+pub mod registry;
 pub mod runner;

@@ -101,6 +101,14 @@
     max-width: 90vw;
     overflow: hidden;
   }
+  /* In glass mode, layer a real macOS-style blur over the now-rgba
+     modal-bg so the modal reads as a floating glass card instead of
+     a flat translucent rectangle. Scoped to body.glass-mode so solid
+     themes don't pay the GPU cost of backdrop-filter on every modal. */
+  :global(body.glass-mode) .q-modal {
+    backdrop-filter: blur(30px) saturate(180%);
+    -webkit-backdrop-filter: blur(30px) saturate(180%);
+  }
 
   @keyframes modalUp {
     from { opacity: 0; transform: translateY(8px) scale(0.98); }

@@ -13,6 +13,16 @@ export interface CloudStatus {
 export const cloudGetStatus = () =>
   invoke<CloudStatus>('cloud_get_status');
 
+export interface MissingCredentials {
+  ssh: string[];
+  sql: string[];
+  nosql: string[];
+  explorer: string[];
+}
+
+export const cloudProbeMissingCredentials = () =>
+  invoke<MissingCredentials>('cloud_probe_missing_credentials');
+
 export const cloudGithubLoginUrl = () =>
   invoke<string>('cloud_github_login_url');
 

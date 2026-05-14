@@ -210,6 +210,7 @@
       fontSize: 13,
       fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", "Menlo", monospace',
       theme: getCurrentTermTheme(),
+      allowTransparency: true,
       scrollback: 10000,
       lineHeight: 1.35,
       smoothScrollDuration: 100,

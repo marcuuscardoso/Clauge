@@ -1,4 +1,5 @@
 import type { KVInput } from '$lib/types';
+import { safeDecodeURIComponent } from './url-decode';
 
 export interface ParsedCurl {
   method: string;
@@ -368,12 +369,12 @@ function parseUrlencodedToJson(raw: string): string {
     const eqIdx = pair.indexOf('=');
     if (eqIdx >= 0) {
       return {
-        key: decodeURIComponent(pair.substring(0, eqIdx).replace(/\+/g, ' ')),
-        value: decodeURIComponent(pair.substring(eqIdx + 1).replace(/\+/g, ' ')),
+        key: safeDecodeURIComponent(pair.substring(0, eqIdx).replace(/\+/g, ' ')),
+        value: safeDecodeURIComponent(pair.substring(eqIdx + 1).replace(/\+/g, ' ')),
         enabled: true,
       };
     }
-    return { key: decodeURIComponent(pair.replace(/\+/g, ' ')), value: '', enabled: true };
+    return { key: safeDecodeURIComponent(pair.replace(/\+/g, ' ')), value: '', enabled: true };
   });
   return JSON.stringify(fields);
 }

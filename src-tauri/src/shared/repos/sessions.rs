@@ -54,13 +54,14 @@ pub async fn insert_hidden_session(
     coworker_id: &str,
     created_at: &str,
     last_used_at: &str,
+    provider: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO agent_sessions \
          (id, title, purpose, project_path, project_name, context_prompt, \
           skip_permissions, git_name, git_email, created_at, last_used_at, \
-          origin, card_id, coworker_id) \
-         VALUES (?, ?, '', ?, ?, '', 0, NULL, NULL, ?, ?, 'card', ?, ?)",
+          origin, card_id, coworker_id, provider) \
+         VALUES (?, ?, '', ?, ?, '', 0, NULL, NULL, ?, ?, 'card', ?, ?, ?)",
     )
     .bind(id)
     .bind(title)
@@ -70,6 +71,7 @@ pub async fn insert_hidden_session(
     .bind(last_used_at)
     .bind(card_id)
     .bind(coworker_id)
+    .bind(provider)
     .execute(pool)
     .await?;
     Ok(())
@@ -120,9 +122,10 @@ pub async fn insert_session(
     git_email: Option<&str>,
     created_at: &str,
     last_used_at: &str,
+    provider: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO agent_sessions (id, title, purpose, project_path, project_name, context_prompt, skip_permissions, git_name, git_email, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_sessions (id, title, purpose, project_path, project_name, context_prompt, skip_permissions, git_name, git_email, created_at, last_used_at, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
     .bind(title)
@@ -135,6 +138,7 @@ pub async fn insert_session(
     .bind(git_email)
     .bind(created_at)
     .bind(last_used_at)
+    .bind(provider)
     .execute(pool)
     .await?;
     Ok(())

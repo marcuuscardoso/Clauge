@@ -386,7 +386,7 @@
     const ACCENT_COLORS = ACCENT_PALETTE;
 
     const THEME_DESCRIPTIONS: Record<string, string> = {
-        "dark-glass": "Transparent with macOS vibrancy",
+        "dark-glass": "Translucent with native blur",
         "dark-solid": "Opaque dark with purple tints",
         midnight: "Pure black, zero distraction",
         nord: "Arctic blue-gray palette",
@@ -512,7 +512,12 @@
                 agentUsageAuthStatus.set({ state: "unconfigured", message: "" });
             }
         } else if (key === "agent_footer_usage_provider") {
-            if (value === "claude" || value === "codex") {
+            if (
+                value === "claude" ||
+                value === "codex" ||
+                value === "gemini" ||
+                value === "opencode"
+            ) {
                 agentFooterProviderStore.set(value);
             }
             // Provider switch — clear stale chip state and re-fetch using
@@ -812,7 +817,12 @@
     async function loadAgentUsage() {
         agentUsageLoading = true;
         try {
-            agentUsageData = await agentGetUsageAnalytics(agentUsageDays);
+            // Provider tracks the footer toggle so Settings reflects
+            // the same scope as the floating Usage Dashboard.
+            agentUsageData = await agentGetUsageAnalytics(
+                agentUsageDays,
+                agentFooterProvider,
+            );
         } catch {
             agentUsageData = null;
         }
@@ -852,14 +862,25 @@
     let isNewContext = $state(false);
     let deleteConfirmId = $state<string | null>(null);
 
+    // Provider tabs. Claude uses marketplace-directory + CLI subcommand
+    // model; Codex's plugin lifecycle lives in its TUI (`/plugins`
+    // slash command) so we list/toggle by parsing ~/.codex/config.toml
+    // and show an "install inside Codex" hint. OpenCode is npm-based
+    // (no marketplace) — excluded.
+    const PLUGIN_PROVIDER_TABS: { id: string; label: string }[] = [
+        { id: "claude", label: "Claude" },
+        { id: "codex", label: "Codex" },
+    ];
+    let pluginProvider = $state<string>("claude");
+
     async function loadAgentPlugins() {
         try {
-            installedPlugins = await agentGetPlugins();
+            installedPlugins = await agentGetPlugins(pluginProvider);
         } catch {
             installedPlugins = [];
         }
         try {
-            marketplacePlugins = await agentGetMarketplacePlugins();
+            marketplacePlugins = await agentGetMarketplacePlugins(pluginProvider);
         } catch {
             marketplacePlugins = [];
         }
@@ -875,7 +896,7 @@
 
     async function handleTogglePlugin(name: string, enabled: boolean) {
         try {
-            await agentTogglePlugin(name, enabled);
+            await agentTogglePlugin(name, enabled, pluginProvider);
             installedPlugins = installedPlugins.map((p) =>
                 p.name === name ? { ...p, enabled } : p,
             );
@@ -887,7 +908,7 @@
 
     async function handleUninstallPlugin(name: string, marketplace: string) {
         try {
-            await agentUninstallPlugin(name, marketplace);
+            await agentUninstallPlugin(name, marketplace, pluginProvider);
             installedPlugins = installedPlugins.filter((p) => p.name !== name);
             marketplacePlugins = marketplacePlugins.map((p) =>
                 p.name === name ? { ...p, installed: false } : p,
@@ -900,7 +921,7 @@
 
     async function handleInstallPlugin(name: string, marketplace: string) {
         try {
-            await agentInstallPlugin(name, marketplace);
+            await agentInstallPlugin(name, marketplace, pluginProvider);
             marketplacePlugins = marketplacePlugins.map((p) =>
                 p.name === name ? { ...p, installed: true } : p,
             );
@@ -909,6 +930,19 @@
         } catch {
             showToast("Failed to install plugin", "error");
         }
+    }
+
+    // Switching tabs reloads the list against the new provider's tooling.
+    // Codex has no marketplace browser in Clauge, so we lock its view
+    // to 'installed' — flipping to 'marketplace' there would show
+    // perpetual-empty state and confuse users.
+    function selectPluginProvider(id: string) {
+        if (pluginProvider === id) return;
+        pluginProvider = id;
+        if (id === "codex") pluginView = "installed";
+        installedPlugins = [];
+        marketplacePlugins = [];
+        loadAgentPlugins();
     }
 
     function startEditContext(ctx: AgentContext) {
@@ -981,20 +1015,21 @@
         }
     });
 
-    let agentUsageLoaded = false;
+    // Reload Usage Stats whenever the panel is open AND the footer
+    // provider toggle changes — picking OpenCode in the dropdown
+    // should immediately retarget the analytics query, same as the
+    // floating Usage Dashboard. The dependency on agentFooterProvider
+    // makes the effect re-run.
     $effect(() => {
-        if (agentSubTab === "usage" && show && !agentUsageLoaded) {
-            agentUsageLoaded = true;
+        const _ = agentFooterProvider; // dependency
+        if (agentSubTab === "usage" && show) {
             loadAgentUsage();
-        }
-        if (agentSubTab !== "usage") {
-            agentUsageLoaded = false;
         }
     });
 </script>
 
 {#if show}
-<div class="stg-pane" role="region" aria-label="Settings">
+<div class="stg-pane glass-surface" role="region" aria-label="Settings">
     <div class="stg-layout">
         <!-- Tab sidebar -->
         <div class="stg-tabs">
@@ -1334,9 +1369,7 @@
                             <div class="stg-card-titles">
                                 <h3 class="stg-card-title">MCP Server</h3>
                                 <p class="stg-card-sub">
-                                    Local MCP server that lets agents (Claude Code, etc.) read and edit your
-                                    Notes and Boards via tool calls. Auto-registers in <span class="stg-card-mono">~/.claude/settings.json</span>
-                                    when enabled.
+                                    Local MCP server that lets MCP-aware coding agents read and edit your Notes and Boards via tool calls. Each installed agent's config is registered automatically when enabled.
                                 </p>
                             </div>
                             <span class="stg-card-pill" class:on={mcpStatus.running}>
@@ -2224,31 +2257,9 @@
                         <button
                             class="ai-subtab"
                             class:active={agentSubTab === "usage"}
-                            class:disabled={!agentSessionKey}
-                            onclick={() => {
-                                if (agentSessionKey) agentSubTab = "usage";
-                            }}
+                            onclick={() => (agentSubTab = "usage")}
                         >
                             Usage Stats
-                            {#if !agentSessionKey}
-                                <svg
-                                    class="ai-subtab-lock"
-                                    viewBox="0 0 24 24"
-                                    width="11"
-                                    height="11"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    ><rect
-                                        x="3"
-                                        y="11"
-                                        width="18"
-                                        height="11"
-                                        rx="2"
-                                        ry="2"
-                                    /><path d="M7 11V7a5 5 0 0110 0v4" /></svg
-                                >
-                            {/if}
                         </button>
                     </div>
 
@@ -2338,6 +2349,12 @@
                                             >Codex{agentCodexToken
                                                 ? ""
                                                 : " (not configured)"}</option
+                                        >
+                                        <option value="gemini"
+                                            >Gemini (local data only)</option
+                                        >
+                                        <option value="opencode"
+                                            >OpenCode (local data only)</option
                                         >
                                     </select>
                                 </div>
@@ -2680,21 +2697,52 @@
                         </section>
                     </div>
                 {:else if agentSubTab === "plugins"}
-                    <!-- Installed / Marketplace toggle -->
-                    <div class="agent-plugin-views">
-                        <button
-                            class="ai-action-btn"
-                            class:primary={pluginView === "installed"}
-                            onclick={() => (pluginView = "installed")}
-                            >Installed</button
-                        >
-                        <button
-                            class="ai-action-btn"
-                            class:primary={pluginView === "marketplace"}
-                            onclick={() => (pluginView = "marketplace")}
-                            >Marketplace</button
-                        >
+                    <!-- CLI provider tab strip — each provider has its own
+                         marketplace + installed list. OpenCode isn't here
+                         because its plugins are npm packages with no
+                         marketplace concept (handled at the runner level). -->
+                    <div class="plugin-provider-tabs">
+                        {#each PLUGIN_PROVIDER_TABS as t}
+                            <button
+                                class="plugin-provider-tab"
+                                class:active={pluginProvider === t.id}
+                                onclick={() => selectPluginProvider(t.id)}
+                                >{t.label}</button
+                            >
+                        {/each}
                     </div>
+
+                    <!-- Installed / Marketplace toggle. Codex doesn't
+                         have a Clauge-side marketplace browser (installs
+                         happen inside the codex TUI), so we hide that
+                         half of the toggle and show only Installed. -->
+                    {#if pluginProvider !== "codex"}
+                        <div class="agent-plugin-views">
+                            <button
+                                class="ai-action-btn"
+                                class:primary={pluginView === "installed"}
+                                onclick={() => (pluginView = "installed")}
+                                >Installed</button
+                            >
+                            <button
+                                class="ai-action-btn"
+                                class:primary={pluginView === "marketplace"}
+                                onclick={() => (pluginView = "marketplace")}
+                                >Marketplace</button
+                            >
+                        </div>
+                    {/if}
+
+                    {#if pluginProvider === "codex"}
+                        <div class="plugin-codex-hint" role="status">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+                            </svg>
+                            <span>
+                                Codex installs plugins from inside its own UI — run <code>codex</code> in a terminal and use the <code>/plugins</code> slash command. Installed plugins show up here and can be enabled or disabled.
+                            </span>
+                        </div>
+                    {/if}
 
                     {#if pluginView === "installed"}
                         {#if installedPlugins.length === 0}
@@ -3772,6 +3820,13 @@
         display: flex;
         background: var(--c);
     }
+    /* In glass mode, bump Settings' background opacity so its dense
+       text + form rows stay legible (var(--c) is rgba 0.40 — fine
+       for chrome surfaces, too translucent for a full content panel).
+       glass-surface adds the backdrop-filter blur via app.css. */
+    :global(body.glass-mode) .stg-pane {
+        background: var(--modal-bg);
+    }
 
     /* ------- Settings cards ------- */
     /* Reusable across all settings tabs (General / REST / AI / Agent /
@@ -4061,5 +4116,57 @@
     .stg-card-mini-btn:disabled {
         opacity: 0.4;
         cursor: not-allowed;
+    }
+
+    /* CLI provider tab strip above the plugins panel. Hairline underline
+     * on the active tab so it reads as "scope filter" rather than a
+     * primary CTA. */
+    .plugin-provider-tabs {
+        display: flex;
+        gap: 4px;
+        border-bottom: 1px solid var(--b1);
+        margin-bottom: 12px;
+    }
+    .plugin-provider-tab {
+        padding: 8px 14px;
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: var(--t3);
+        font-family: var(--ui);
+        font-size: 12.5px;
+        font-weight: 500;
+        cursor: default;
+        transition: color 0.12s, border-color 0.12s;
+    }
+    .plugin-provider-tab:hover { color: var(--t1); }
+    .plugin-provider-tab.active {
+        color: var(--t1);
+        border-bottom-color: var(--acc);
+    }
+
+    .plugin-codex-hint {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px 12px;
+        margin: 8px 0 12px;
+        background: color-mix(in srgb, var(--acc) 8%, transparent);
+        border: 1px solid color-mix(in srgb, var(--acc) 25%, var(--b1));
+        border-radius: 8px;
+        font-size: 12px;
+        line-height: 1.55;
+        color: var(--t2);
+        font-family: var(--ui);
+    }
+    .plugin-codex-hint svg { flex-shrink: 0; margin-top: 2px; color: var(--acc); }
+    .plugin-codex-hint code {
+        font-family: var(--mono, monospace);
+        font-size: 11px;
+        background: var(--c);
+        border: 1px solid var(--b1);
+        border-radius: 4px;
+        padding: 0 5px;
+        color: var(--t1);
     }
 </style>

@@ -74,10 +74,62 @@ pub fn apply_vibrancy(window: &tauri::WebviewWindow, material: &str) -> Result<(
 }
 
 #[cfg(target_os = "linux")]
-pub fn apply_vibrancy(_window: &tauri::WebviewWindow, _material: &str) -> Result<(), String> {
-    // No reliable cross-distro vibrancy. Caller should fall back to opaque
-    // theme; default_theme() already returns "dark-solid" on Linux.
-    Err("vibrancy unsupported on linux".to_string())
+pub fn apply_vibrancy(_window: &tauri::WebviewWindow, material: &str) -> Result<(), String> {
+    // Linux has no cross-distro vibrancy API. The glass effect comes
+    // from `transparent: true` (set in `tauri.linux.conf.json`) plus
+    // the compositor's own blur — when the compositor supports it.
+    // We return Ok ONLY when the running desktop is in our known
+    // blur-capable allowlist; everywhere else we Err so the CSS
+    // fallback (opaque body background, see app.css `body.glass-mode`)
+    // kicks in and the user can't end up with a fully-transparent
+    // window showing the white WebKitGTK default through it.
+    if material == "none" {
+        return Ok(());
+    }
+    if linux_compositor_supports_blur() {
+        Ok(())
+    } else {
+        Err("compositor blur unavailable".to_string())
+    }
+}
+
+/// Allowlist of Linux desktops where window blur is reliable enough
+/// to enable the glass theme by default. The check is based on
+/// `XDG_CURRENT_DESKTOP` (and `DESKTOP_SESSION` as a secondary
+/// signal) — both are set by every modern session manager.
+///
+/// Known good:
+///   • KDE Plasma — KWin's blur effect is on by default since Plasma 5,
+///     polished in Plasma 6.
+///   • Hyprland — has a first-class blur shader; on by default.
+///   • Sway — supports blur via the `blur` directive (most users have
+///     it on if they bother with Sway theming).
+///   • GNOME — Mutter doesn't blur by default, but a large share of
+///     GNOME users run the "Blur My Shell" extension. Including it
+///     here because the rest of the chrome (transparent window,
+///     rgba surfaces) still degrades gracefully without blur.
+///
+/// Explicitly NOT here: XFCE, MATE, LXQt, Cinnamon, Pantheon,
+/// Enlightenment, IceWM — these either don't composite or compositor
+/// blur isn't a settled feature. Users on these can still pick the
+/// theme; they just get the safe opaque fallback CSS rather than a
+/// risky transparent-window-with-no-blur look.
+#[cfg(target_os = "linux")]
+fn linux_compositor_supports_blur() -> bool {
+    let de = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let session = std::env::var("DESKTOP_SESSION")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let candidates = [&de, &session];
+    candidates.iter().any(|s| {
+        s.contains("kde")
+            || s.contains("plasma")
+            || s.contains("hyprland")
+            || s.contains("sway")
+            || s.contains("gnome")
+    })
 }
 
 #[tauri::command]
@@ -115,6 +167,13 @@ pub async fn set_appearance(
     config: AppearanceConfig,
 ) -> Result<(), String> {
     let is_glass = config.theme == "dark-glass";
+    // Sidebar material on macOS: brighter than HudWindow (which
+    // renders intentionally dark for floating heads-up displays) and
+    // the recommended material for main window chrome. Combined with
+    // the lower CSS surface alphas (0.62) the wallpaper still reads
+    // through clearly — without darkening the overall feel. On
+    // Windows / Linux the material arg is ignored: Mica / Acrylic /
+    // compositor transparency drive the look there.
     let vibrancy_material = if is_glass { "sidebar" } else { "none" };
 
     let settings = [
@@ -135,7 +194,6 @@ pub async fn set_appearance(
     // user can still pick "dark-glass" without seeing a broken-looking failure.
     // The theme just renders as opaque dark.
     let _ = apply_vibrancy(&window, vibrancy_material);
-
     Ok(())
 }
 
@@ -146,7 +204,7 @@ pub async fn get_available_themes() -> Result<Vec<ThemeInfo>, String> {
         ThemeInfo {
             id: "dark-glass".to_string(),
             name: "Dark Glass".to_string(),
-            description: "Translucent dark theme with native vibrancy".to_string(),
+            description: "Translucent with native blur".to_string(),
             preview_bg: "#07070f".to_string(),
             preview_accent: "#7c5cf8".to_string(),
         },
@@ -180,10 +238,11 @@ pub async fn get_available_themes() -> Result<Vec<ThemeInfo>, String> {
         // the palettes.
     ];
 
-    // Linux: hide dark-glass (vibrancy is unsupported there).
-    #[cfg(target_os = "linux")]
-    let all = all.into_iter().filter(|t| t.id != "dark-glass").collect();
-
+    // dark-glass is now reachable on every OS — macOS via
+    // NSVisualEffectMaterial::HudWindow, Windows via Mica/Acrylic,
+    // Linux via `transparent: true` + compositor blur. The Linux
+    // first-launch default is still dark-solid (see `default_theme`)
+    // because compositor blur isn't guaranteed; user opts in.
     Ok(all)
 }
 

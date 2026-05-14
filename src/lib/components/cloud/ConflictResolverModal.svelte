@@ -114,7 +114,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="cr-overlay" use:teleportToBody onclick={close}>
-    <div class="cr-modal" onclick={(e: MouseEvent) => e.stopPropagation()} role="dialog" aria-modal="true">
+    <div class="cr-modal glass-surface" onclick={(e: MouseEvent) => e.stopPropagation()} role="dialog" aria-modal="true">
       <header class="cr-hdr">
         <span class="cr-title">Some changes need your attention</span>
         <button class="cr-close" onclick={close} aria-label="Close" disabled={!!busy}>&times;</button>

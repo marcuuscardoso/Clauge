@@ -177,6 +177,85 @@ pub async fn store_google(
     Ok(())
 }
 
+/// Persist a refreshed Google token pair WITHOUT touching active_provider
+/// / user_id. Smaller than `store_google` — used by the refresh-and-retry
+/// path where only the access_token + id_token rotate. `id_token` is
+/// required (caller decides what to do on a null id_token); `access_token`
+/// is optional because Google's refresh response always returns it but
+/// we accept a Some/None signature for symmetry with `store_google`.
+pub async fn update_google_tokens(
+    state: &AuthState,
+    access_token: Option<&str>,
+    id_token: &str,
+) -> Result<(), String> {
+    let store = credential_store();
+    if let Some(t) = access_token {
+        store
+            .store(&keyring_key(KEY_GOOGLE_ACCESS), t)
+            .await
+            .map_err(|e| format!("keyring store google access: {}", e))?;
+    }
+    store
+        .store(&keyring_key(KEY_GOOGLE_ID), id_token)
+        .await
+        .map_err(|e| format!("keyring store google id_token: {}", e))?;
+
+    let mut s = state.0.lock();
+    if let Some(t) = access_token {
+        s.google_access = Some(t.to_string());
+    }
+    s.google_id_token = Some(id_token.to_string());
+    Ok(())
+}
+
+/// Call the Worker's `/api/auth/google/refresh` endpoint with the stored
+/// refresh token, then persist the rotated access_token + id_token. On
+/// any failure that means the session is unrecoverable — refresh token
+/// missing, Worker returned 4xx (token revoked / expired grant), or
+/// Google omitted a fresh id_token (we have no way to continue when
+/// the bearer is id_token-based) — this clears auth and returns
+/// `CloudError::NotAuthenticated` so the caller can flip the UI to a
+/// signed-out state.
+pub async fn refresh_google_and_store(
+    state: &AuthState,
+    pool: &SqlitePool,
+) -> Result<(), crate::cloud::client::CloudError> {
+    use crate::cloud::client::{refresh_google, CloudError};
+    let refresh_token = state.snapshot().google_refresh;
+    let rt = match refresh_token {
+        Some(t) if !t.is_empty() => t,
+        _ => return Err(CloudError::NotAuthenticated),
+    };
+    let resp = match refresh_google(pool, &rt).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[cloud:auth] google refresh failed: {}", e);
+            // Worker 400 / invalid_grant → refresh token is dead.
+            // Server 5xx / network → keep state, surface the original
+            // error so the caller can retry later (don't wipe auth).
+            if matches!(&e, CloudError::Server { status, .. } if *status == 400 || *status == 401) {
+                let _ = clear(state, pool).await;
+                return Err(CloudError::NotAuthenticated);
+            }
+            return Err(e);
+        }
+    };
+    let id_token = match resp.id_token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            // Google didn't return a fresh id_token. Our bearer flow
+            // depends on it, so we're stuck. Force re-login.
+            log::warn!("[cloud:auth] google refresh returned no id_token; clearing auth");
+            let _ = clear(state, pool).await;
+            return Err(CloudError::NotAuthenticated);
+        }
+    };
+    update_google_tokens(state, Some(&resp.token), &id_token)
+        .await
+        .map_err(CloudError::Network)?;
+    Ok(())
+}
+
 /// Clear all keyring entries + in-memory state. Local SQLite data is untouched.
 pub async fn clear(state: &AuthState, pool: &SqlitePool) -> Result<(), String> {
     let store = credential_store();

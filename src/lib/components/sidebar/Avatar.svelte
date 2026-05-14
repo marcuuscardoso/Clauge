@@ -6,6 +6,18 @@
   // redundant. We only show a dot when the user has something to *do* —
   // currently: one or more kinds are conflict-locked and need their pick.
   const needsAttention = $derived($cloudConnected && $cloudConflicts.length > 0);
+
+  // When the avatar URL fails to load (offline, host blocked, image
+  // expired, etc.) the <img> would render the broken-image glyph. Flip
+  // a flag on `onerror` so we fall back to the initial-letter view
+  // instead. Reset whenever the URL changes so a retry after the
+  // network recovers is possible.
+  let imgFailed = $state(false);
+  $effect(() => {
+    // Track the URL so the effect re-runs when it changes.
+    const _ = $cloudUser?.avatarUrl;
+    imgFailed = false;
+  });
 </script>
 
 <div class="avatar-connected">
@@ -15,8 +27,14 @@
       ? `Action required — ${$cloudConflicts.length} item${$cloudConflicts.length === 1 ? '' : 's'} to resolve`
       : ($cloudConnected ? `${$cloudDisplayHandle?.handle ?? ''}` : 'Profile')}
   >
-    {#if $cloudConnected && $cloudUser?.avatarUrl}
-      <img class="avatar-img" src={$cloudUser.avatarUrl} alt={$cloudDisplayHandle?.handle ?? ''} />
+    {#if $cloudConnected && $cloudUser?.avatarUrl && !imgFailed}
+      <img
+        class="avatar-img"
+        src={$cloudUser.avatarUrl}
+        alt={$cloudDisplayHandle?.handle ?? ''}
+        referrerpolicy="no-referrer"
+        onerror={() => (imgFailed = true)}
+      />
     {:else if $cloudConnected}
       <span class="avatar-letter">{($cloudDisplayHandle?.handle ?? 'U').charAt(0).toUpperCase()}</span>
     {:else}

@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::cloud::auth::{self, AuthState};
-use crate::cloud::client;
+use crate::cloud::client::{self, CloudError};
 use crate::cloud::config::{settings_key_synced_at, SETTINGS_KEY_HAS_SYNCED};
 use crate::cloud::domains::ALL_KINDS;
 use crate::cloud::models::{CloudStatus, CloudUser};
@@ -25,8 +25,18 @@ pub async fn cloud_get_status(
         return Ok(CloudStatus::default());
     }
 
-    // Fetch fresh `me` from the server; if it fails we still return a partial
-    // status so the UI can render the "we have a token but server is down" state.
+    // Fetch fresh `me` from the server. The client::me path now
+    // self-refreshes on 401 (Google only — see
+    // `with_google_refresh_retry`), so by the time we get here:
+    //   • Ok       → token was either valid or successfully refreshed.
+    //   • NotAuth  → refresh exhausted / no refresh path; clear local
+    //                auth and tell the UI we're signed out. Returning
+    //                CloudStatus::default with connected:false flips
+    //                the avatar back to the sign-in prompt instead of
+    //                rendering an empty user card.
+    //   • Other    → network / 5xx; keep partial state so the UI can
+    //                render "we have a token, server is unreachable"
+    //                without losing the in-keychain identity.
     match client::me(pool.inner(), &state).await {
         Ok(me) => {
             let mut last_synced = std::collections::HashMap::new();
@@ -43,6 +53,10 @@ pub async fn cloud_get_status(
                 plan: me.plan,
                 last_synced,
             })
+        }
+        Err(CloudError::NotAuthenticated) => {
+            let _ = auth::clear(&state, pool.inner()).await;
+            Ok(CloudStatus::default())
         }
         Err(_) => Ok(CloudStatus {
             connected: true,

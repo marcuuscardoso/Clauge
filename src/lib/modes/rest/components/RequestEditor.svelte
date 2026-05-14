@@ -5,6 +5,7 @@
   import BodyEditor from './BodyEditor.svelte';
   import KVTable from './KVTable.svelte';
   import AuthEditor from './AuthEditor.svelte';
+  import { safeDecodeURIComponent } from '../utils/url-decode';
 
   interface Props {
     currentMethod?: string;
@@ -41,9 +42,9 @@
     const urlParams: KVInput[] = qs.split('&').filter(Boolean).map(pair => {
       const eqIdx = pair.indexOf('=');
       if (eqIdx >= 0) {
-        return { key: decodeURIComponent(pair.substring(0, eqIdx)), value: decodeURIComponent(pair.substring(eqIdx + 1)), enabled: 1 };
+        return { key: safeDecodeURIComponent(pair.substring(0, eqIdx)), value: safeDecodeURIComponent(pair.substring(eqIdx + 1)), enabled: 1 };
       }
-      return { key: decodeURIComponent(pair), value: '', enabled: 1 };
+      return { key: safeDecodeURIComponent(pair), value: '', enabled: 1 };
     });
     // Merge: URL params take precedence, add any saved params not in URL
     const urlKeys = new Set(urlParams.map(p => p.key));

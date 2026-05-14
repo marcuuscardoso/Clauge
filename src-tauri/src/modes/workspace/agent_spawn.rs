@@ -517,6 +517,7 @@ async fn create_hidden_session_and_claim(
         &coworker.id,
         &now,
         &now,
+        &coworker.provider,
     )
     .await
     .map_err(|e| format!("DB error creating hidden session: {e}"))?;
@@ -586,9 +587,8 @@ fn slugify(s: &str) -> String {
 }
 
 /// Per-provider argv for non-interactive ("print mode") invocation,
-/// with the coworker's persona + card context injected as an appended
-/// system prompt. Adding codex/gemini/opencode = one new arm each when
-/// their print flags land.
+/// with the coworker's persona + card context injected. Each CLI has
+/// its own conventions; the comments on each arm spell them out.
 fn oneshot_argv(
     coworker: &WorkspaceCoworker,
     card_id: &str,
@@ -619,6 +619,75 @@ fn oneshot_argv(
                 argv.push("--resume".to_string());
                 argv.push(sid.to_string());
             }
+            argv
+        }
+        "codex" => {
+            // Codex's non-interactive form is `codex exec PROMPT`. Resume
+            // is a sub-form of exec: `codex exec resume <id> PROMPT`.
+            // Permission gate is bypassed the same way for the same
+            // reasons as Claude.
+            let mut argv = vec!["codex".to_string(), "exec".to_string()];
+            if let Some(sid) = resume_id {
+                argv.push("resume".to_string());
+                argv.push(sid.to_string());
+            }
+            argv.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+            if !persona.is_empty() {
+                // `-c instructions=<TOML literal>`. The argv form bypasses
+                // shell quoting; we just need a valid TOML string. Wrap
+                // in double quotes and escape backslashes + double quotes.
+                let toml_escaped = persona.replace('\\', "\\\\").replace('"', "\\\"");
+                argv.push("-c".to_string());
+                argv.push(format!("instructions=\"{}\"", toml_escaped));
+            }
+            argv.push(prompt.to_string());
+            argv
+        }
+        "opencode" => {
+            // OpenCode's non-interactive form is `opencode run <message>`.
+            // It has no system-prompt flag, so the persona is prepended
+            // to the message itself with a separator. Resume by id uses
+            // `-s <id>`.
+            let body = if persona.is_empty() {
+                prompt.to_string()
+            } else {
+                format!("{persona}\n\n---\n\n{prompt}")
+            };
+            let mut argv = vec!["opencode".to_string(), "run".to_string()];
+            if let Some(sid) = resume_id {
+                argv.push("-s".to_string());
+                argv.push(sid.to_string());
+            }
+            argv.push(body);
+            argv
+        }
+        "gemini" => {
+            // Gemini's non-interactive form is `gemini -p <prompt>`.
+            // No system-prompt flag — prepend persona to the prompt the
+            // same way OpenCode does. `--skip-trust` opts out of the
+            // workspace trust prompt that would otherwise hang a
+            // headless turn. `--yolo` auto-approves tool calls (same
+            // safety argument as the Claude / Codex arms above).
+            // Resume: Gemini's `--resume` is index-based; we pass
+            // `--resume latest` whenever discovery has surfaced *any*
+            // existing session id for this card, since the latest one
+            // in the per-project dir is the same row Clauge tracked.
+            let body = if persona.is_empty() {
+                prompt.to_string()
+            } else {
+                format!("{persona}\n\n---\n\n{prompt}")
+            };
+            let mut argv = vec![
+                "gemini".to_string(),
+                "--skip-trust".to_string(),
+                "--yolo".to_string(),
+            ];
+            if resume_id.is_some() {
+                argv.push("--resume".to_string());
+                argv.push("latest".to_string());
+            }
+            argv.push("-p".to_string());
+            argv.push(body);
             argv
         }
         _ => Vec::new(),

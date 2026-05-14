@@ -122,7 +122,12 @@
           </div>
         {/each}
       </div>
-    {:else if ($agentFooterProvider === 'codex' ? !$agentCodexToken : !$agentSessionKey) || $agentUsageAuthStatus.state === 'invalid'}
+    {:else if $agentFooterProvider !== 'opencode' && $agentFooterProvider !== 'gemini' && (($agentFooterProvider === 'codex' ? !$agentCodexToken : !$agentSessionKey) || $agentUsageAuthStatus.state === 'invalid')}
+      <!-- Setup prompt only for providers that HAVE a rate-limit API
+           (Claude, Codex). OpenCode and Gemini have no first-party
+           subscription-rate endpoint, so we leave the chip area blank
+           rather than asking the user to configure something that
+           doesn't exist. -->
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="si setup-usage" class:invalid={$agentUsageAuthStatus.state === 'invalid'} onclick={() => openSettingsTab('agent')} title={$agentUsageAuthStatus.message || `Configure ${$agentFooterProvider === 'codex' ? 'Codex' : 'Claude'} usage tracking`}>
         <svg style="width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>

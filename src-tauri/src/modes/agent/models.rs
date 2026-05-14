@@ -33,6 +33,11 @@ pub struct AgentSession {
     /// Backref to the workspace card that owns this hidden session.
     /// `None` for manual sessions and for released hidden sessions.
     pub card_id: Option<String>,
+    /// Which coding-assistant CLI backs this session. Maps to
+    /// `CliRunner::id()` — `"claude"` | `"codex"` | `"gemini"` |
+    /// `"opencode"`. Migration 13 added the column with a default of
+    /// `"claude"`, so every pre-multi-CLI row still resolves correctly.
+    pub provider: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

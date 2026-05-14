@@ -122,6 +122,7 @@
     import ShortcutsOverlay from "$lib/shared/primitives/ShortcutsOverlay.svelte";
     import SaveRequestDialog from "$lib/shared/primitives/SaveRequestDialog.svelte";
     import Onboarding from "$lib/components/onboarding/Onboarding.svelte";
+    import RestoreNotice from "$lib/components/RestoreNotice.svelte";
     import WhatsNewModal from "$lib/shared/primitives/WhatsNewModal.svelte";
     import UpdateNotification from "$lib/shared/primitives/UpdateNotification.svelte";
     import SshAuthPromptsModal from "$lib/modes/ssh/components/SshAuthPromptsModal.svelte";
@@ -615,6 +616,7 @@
         );
     }
 
+
     // Disable macOS autocorrect/autocapitalize on all inputs
     function disableAutocorrect(el: Element) {
         el.setAttribute("autocorrect", "off");
@@ -977,6 +979,7 @@
 {/if}
 
 <Toast />
+<RestoreNotice />
 <ContextMenu />
 <EnvManagerModal />
 <ShortcutsOverlay

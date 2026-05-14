@@ -3,7 +3,7 @@
   import Modal from '$lib/shared/primitives/Modal.svelte';
   import { agentFetchUsageLimits, agentGetUsageAnalytics } from '../commands';
   import { setSetting } from '$lib/stores/settings';
-  import { agentSessionKey, agentUsageAuthStatus, agentUsageLimits } from '../stores';
+  import { agentSessionKey, agentUsageAuthStatus, agentUsageLimits, agentFooterProvider } from '../stores';
   import { showToast } from '$lib/shared/primitives/toast';
   import type { UsageAnalytics } from '../types';
 
@@ -21,11 +21,22 @@
 
   async function load() {
     loading = true;
-    try { data = await agentGetUsageAnalytics(days); } catch { data = null; }
+    try {
+      // Provider comes from the agent footer toggle so the dashboard
+      // always reflects whichever CLI's stats the user is looking at.
+      data = await agentGetUsageAnalytics(days, $agentFooterProvider);
+    } catch {
+      data = null;
+    }
     loading = false;
   }
 
-  $effect(() => { if (show) load(); });
+  // Reload when the dashboard opens, when `days` changes, or when the
+  // user flips the footer provider toggle while the dashboard is open.
+  $effect(() => {
+    const _ = $agentFooterProvider; // dependency
+    if (show) load();
+  });
 
   function selectDays(d: number) { days = d; load(); }
 

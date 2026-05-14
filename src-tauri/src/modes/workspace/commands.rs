@@ -1098,10 +1098,44 @@ pub async fn workspace_mcp_stop(
 // ---------------------------------------------------------------------------
 
 const AGENT_CLAUDE_CODE: &str = "claude-code";
-// Future agents — uncomment + implement when their MCP config format is known.
-// const AGENT_CODEX: &str = "codex";
-// const AGENT_GEMINI: &str = "gemini";
-// const AGENT_OPENCODE: &str = "opencode";
+const AGENT_CODEX: &str = "codex";
+const AGENT_GEMINI: &str = "gemini";
+const AGENT_OPENCODE: &str = "opencode";
+
+/// Env var name the Codex spawn path injects with the workspace MCP
+/// token. Mirrored in `modes/agent/terminal.rs` for `provider=='codex'`
+/// so codex CLI's `--bearer-token-env-var` registration reads the right
+/// variable. Keep this constant in lockstep.
+pub(crate) const CODEX_BEARER_ENV: &str = "CLAUGE_WORKSPACE_TOKEN";
+
+/// Best-effort lazy MCP registration for non-Claude providers.
+/// Called from `agent_create_session` when the user picks Codex or
+/// OpenCode — registers the workspace MCP in that CLI's config so the
+/// session's tools are reachable. Idempotent: re-registering with the
+/// same port + token is a write of the same bytes. Silently no-ops
+/// when the CLI isn't installed (shell-out fails / config path
+/// missing). We never auto-register at app boot for these two — that
+/// would modify external config files for alpha testers who installed
+/// the CLIs for their own use.
+pub async fn ensure_provider_mcp_registered(pool: &SqlitePool, provider: &str) {
+    if provider == "claude" {
+        return; // already handled by maybe_autostart_mcp
+    }
+    let port: u16 = match settings_repo::get_by_key(pool, "workspace_mcp_port").await {
+        Ok(Some(s)) => s.value.parse().unwrap_or(7421),
+        _ => 7421,
+    };
+    let token = match settings_repo::get_by_key(pool, "workspace_mcp_token").await {
+        Ok(Some(s)) => s.value,
+        _ => return, // no token persisted → MCP isn't enabled; skip
+    };
+    let _ = match provider {
+        "codex" => register_codex(port, &token),
+        "gemini" => register_gemini(port, &token),
+        "opencode" => register_opencode(port, &token),
+        _ => Ok(()),
+    };
+}
 
 #[tauri::command]
 pub fn workspace_mcp_register(
@@ -1112,12 +1146,12 @@ pub fn workspace_mcp_register(
     let agent = agent.unwrap_or_else(|| AGENT_CLAUDE_CODE.to_string());
     match agent.as_str() {
         AGENT_CLAUDE_CODE => register_claude_code(port, &token),
-        // AGENT_CODEX => register_codex(port, &token),
-        // AGENT_GEMINI => register_gemini(port, &token),
-        // AGENT_OPENCODE => register_opencode(port, &token),
+        AGENT_CODEX => register_codex(port, &token),
+        AGENT_GEMINI => register_gemini(port, &token),
+        AGENT_OPENCODE => register_opencode(port, &token),
         other => Err(format!(
-            "Unknown agent '{}'. Supported today: {}",
-            other, AGENT_CLAUDE_CODE
+            "Unknown agent '{}'. Supported today: {}, {}, {}, {}",
+            other, AGENT_CLAUDE_CODE, AGENT_CODEX, AGENT_GEMINI, AGENT_OPENCODE
         )),
     }
 }
@@ -1127,12 +1161,12 @@ pub fn workspace_mcp_unregister(agent: Option<String>) -> Result<(), String> {
     let agent = agent.unwrap_or_else(|| AGENT_CLAUDE_CODE.to_string());
     match agent.as_str() {
         AGENT_CLAUDE_CODE => unregister_claude_code(),
-        // AGENT_CODEX => unregister_codex(),
-        // AGENT_GEMINI => unregister_gemini(),
-        // AGENT_OPENCODE => unregister_opencode(),
+        AGENT_CODEX => unregister_codex(),
+        AGENT_GEMINI => unregister_gemini(),
+        AGENT_OPENCODE => unregister_opencode(),
         other => Err(format!(
-            "Unknown agent '{}'. Supported today: {}",
-            other, AGENT_CLAUDE_CODE
+            "Unknown agent '{}'. Supported today: {}, {}, {}, {}",
+            other, AGENT_CLAUDE_CODE, AGENT_CODEX, AGENT_GEMINI, AGENT_OPENCODE
         )),
     }
 }
@@ -1205,6 +1239,220 @@ fn unregister_claude_code() -> Result<(), String> {
     Ok(())
 }
 
+// ─── codex (`codex mcp add` + env-var bearer) ───────────────────────
+//
+// Codex's `codex mcp add NAME --url URL --bearer-token-env-var ENV`
+// records the *env var name* in `~/.codex/config.toml`; the token
+// itself is never written to disk. At runtime, codex reads ENV from
+// its process environment. Our spawn path (terminal.rs, provider=codex)
+// injects `CLAUGE_WORKSPACE_TOKEN=<persisted-token>` into the
+// CommandBuilder, so codex authenticates to the workspace MCP without
+// the token ever leaving our SQLite. When the user invokes codex
+// outside Clauge the env var isn't set and connection fails — which is
+// correct (Clauge's MCP server isn't running there anyway).
+
+fn register_codex(port: u16, _token: &str) -> Result<(), String> {
+    // We don't pass the token here — codex stores only the env-var
+    // name. The actual value is injected at spawn time. Shell out
+    // through the user's login + interactive shell so version-manager
+    // PATHs (nvm/fnm/asdf) resolve `codex` correctly. The URL is
+    // composed of a fixed scheme/host + a u16 port; no shell-special
+    // characters are reachable, so no quoting needed.
+    let url = format!("http://localhost:{}/mcp", port);
+    let cmd = format!(
+        "codex mcp add clauge-workspace --url {} --bearer-token-env-var {}",
+        url, CODEX_BEARER_ENV
+    );
+    run_through_user_shell(&cmd, "codex mcp add")
+}
+
+fn unregister_codex() -> Result<(), String> {
+    let cmd = "codex mcp remove clauge-workspace";
+    // Best-effort: a missing entry isn't an error from our side.
+    let _ = run_through_user_shell(cmd, "codex mcp remove");
+    Ok(())
+}
+
+// ─── opencode (~/.config/opencode/opencode.json) ────────────────────
+//
+// OpenCode's MCP servers are listed under an `mcp` object in its
+// global config (`~/.config/opencode/opencode.json`) or per-project
+// `opencode.json`. We register to the global config so the workspace
+// MCP is reachable from any project the user opens. Schema lifted from
+// opencode.ai/config.json (`type: "remote" | "local"`); we set
+// `headers` for bearer-token auth, matching common MCP client
+// conventions.
+
+fn opencode_config_path() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.trim().is_empty() {
+            return Some(std::path::PathBuf::from(xdg).join("opencode").join("opencode.json"));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".config").join("opencode").join("opencode.json"))
+}
+
+fn register_opencode(port: u16, token: &str) -> Result<(), String> {
+    let path = opencode_config_path().ok_or("home directory not found")?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+    let mut root: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let map = root.as_object_mut().unwrap();
+    let mcp = map.entry("mcp".to_string()).or_insert(serde_json::json!({}));
+    if !mcp.is_object() {
+        *mcp = serde_json::json!({});
+    }
+    let m = mcp.as_object_mut().unwrap();
+    m.insert(
+        "clauge-workspace".to_string(),
+        serde_json::json!({
+            "type": "remote",
+            "url": format!("http://localhost:{}/mcp", port),
+            "headers": { "Authorization": format!("Bearer {}", token) }
+        }),
+    );
+    let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn unregister_opencode() -> Result<(), String> {
+    let path = match opencode_config_path() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut root: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    if let Some(map) = root.as_object_mut() {
+        if let Some(mcp) = map.get_mut("mcp").and_then(|v| v.as_object_mut()) {
+            mcp.remove("clauge-workspace");
+        }
+    }
+    let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ─── gemini (~/.gemini/settings.json) ────────────────────────────────
+//
+// Gemini CLI reads MCP servers from `mcpServers` inside its user
+// settings file (`~/.gemini/settings.json` — the same file `gemini mcp
+// add -s user` writes to). The on-disk shape matches what the CLI
+// produces for `-t http`:
+//
+//     "mcpServers": {
+//       "clauge-workspace": {
+//         "url": "http://localhost:<port>/mcp",
+//         "type": "http",
+//         "headers": { "Authorization": "Bearer <token>" }
+//       }
+//     }
+//
+// Writing the file directly (rather than shelling out to `gemini mcp
+// add`) avoids three things:
+//   1. PATH brittleness when Gemini is installed via a version manager
+//      and the bare `gemini` binary isn't on the non-login shell PATH.
+//   2. The default scope of `gemini mcp add` is "project" — it would
+//      write into `<cwd>/.gemini/settings.json` instead of the user
+//      one, polluting random project folders. Forcing `-s user` works
+//      but the shell-out is still slower and brittler than a write.
+//   3. The CLI rewrites the whole file on every add; reading +
+//      merging here lets us preserve any unrelated keys (`hooks`,
+//      `security`, …) that the user has set.
+
+fn gemini_settings_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".gemini").join("settings.json"))
+}
+
+fn register_gemini(port: u16, token: &str) -> Result<(), String> {
+    let path = gemini_settings_path().ok_or("home directory not found")?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+    let mut root: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let map = root.as_object_mut().unwrap();
+    let servers = map
+        .entry("mcpServers".to_string())
+        .or_insert(serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    let s = servers.as_object_mut().unwrap();
+    s.insert(
+        "clauge-workspace".to_string(),
+        serde_json::json!({
+            "url": format!("http://localhost:{}/mcp", port),
+            "type": "http",
+            "headers": { "Authorization": format!("Bearer {}", token) }
+        }),
+    );
+    let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn unregister_gemini() -> Result<(), String> {
+    let path = match gemini_settings_path() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut root: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    if let Some(map) = root.as_object_mut() {
+        if let Some(servers) = map.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+            servers.remove("clauge-workspace");
+        }
+    }
+    let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Shell-out helper that runs a command string through the user's
+/// login + interactive shell so version-manager PATHs are honored.
+/// Returns Ok(()) on exit-status-success; Err(stderr) otherwise.
+fn run_through_user_shell(cmd: &str, label: &str) -> Result<(), String> {
+    use crate::shared::platform::shell::default_user_shell;
+    let (shell_path, shell_kind) = default_user_shell();
+    let argv = shell_kind.exec_command_argv(cmd);
+    let out = std::process::Command::new(&shell_path)
+        .args(&argv)
+        .output()
+        .map_err(|e| format!("{label} spawn failed: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return Err(format!(
+            "{label} failed: {}",
+            if stderr.is_empty() { stdout } else { stderr }
+        ));
+    }
+    Ok(())
+}
+
 /// Generate a fresh random token, persist it under
 /// `workspace_mcp_token`, AND rewrite any existing `~/.claude.json`
 /// entry so the registered token never goes stale relative to the
@@ -1223,11 +1471,69 @@ pub async fn workspace_mcp_new_token(
     settings_repo::upsert(pool.inner(), "workspace_mcp_token", &token)
         .await
         .map_err(|e| e.to_string())?;
-    // Best-effort re-register. If the registration fails (claude.json
-    // missing / unreadable) the new token is still persisted; the
-    // user's next start cycle will write it.
+    // Best-effort re-register against every provider that's currently
+    // registered. The token itself only lands in Claude / OpenCode
+    // configs (Codex stores only the env-var name, so its registration
+    // doesn't need a rewrite — the new token flows in at spawn time).
     let _ = sync_claude_code_registration(port, &token);
+    let _ = sync_gemini_registration(port, &token);
+    let _ = sync_opencode_registration(port, &token);
     Ok(token)
+}
+
+/// Mirror of `sync_claude_code_registration` for Gemini's
+/// `~/.gemini/settings.json`. Only rewrites when `clauge-workspace`
+/// is already listed; fresh registrations happen at autostart /
+/// enable time.
+fn sync_gemini_registration(port: u16, token: &str) -> Result<(), String> {
+    let path = match gemini_settings_path() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let root: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let already_registered = root
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .map(|m| m.contains_key("clauge-workspace"))
+        .unwrap_or(false);
+    if !already_registered {
+        return Ok(());
+    }
+    register_gemini(port, token)
+}
+
+/// Mirror of `sync_claude_code_registration` for OpenCode's JSON
+/// config. Only rewrites when `clauge-workspace` is already listed;
+/// fresh registrations happen at autostart / enable time.
+fn sync_opencode_registration(port: u16, token: &str) -> Result<(), String> {
+    let path = match opencode_config_path() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let root: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let already_registered = root
+        .get("mcp")
+        .and_then(|v| v.as_object())
+        .map(|m| m.contains_key("clauge-workspace"))
+        .unwrap_or(false);
+    if !already_registered {
+        return Ok(());
+    }
+    register_opencode(port, token)
 }
 
 /// If `~/.claude.json` already lists `clauge-workspace`, rewrite the
@@ -1301,8 +1607,17 @@ pub async fn maybe_autostart_mcp(app: tauri::AppHandle, pool: SqlitePool) {
             if bound != port {
                 let _ = settings_repo::upsert(&pool, "workspace_mcp_port", &bound.to_string()).await;
             }
-            // Register on first boot too so a fresh install picks
-            // up the entry without the user opening Settings.
+            // Register Claude on first boot so a fresh install picks
+            // up the entry without the user opening Settings. We DO
+            // NOT auto-register Codex / OpenCode here — that would
+            // touch their config files (~/.codex/config.toml,
+            // ~/.config/opencode/opencode.json) for every alpha
+            // tester who happens to have those CLIs installed for
+            // their own use, even if they only use Clauge as a Claude
+            // client. Codex / OpenCode register lazily on first
+            // session-create for that provider (see
+            // ensure_provider_mcp_registered, called from
+            // agent_create_session).
             let _ = register_claude_code(bound, &token);
             // Make sure the persisted "enabled" key reflects the
             // running state — first-boot users default to true.

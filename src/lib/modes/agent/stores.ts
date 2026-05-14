@@ -45,7 +45,7 @@ export const agentSessionKey = writable<string>('');
 export const agentCodexToken = writable<string>('');
 /** Which provider's usage to show in the Agent footer. Mirrors the
  *  `agent_footer_usage_provider` setting; hydrated on app boot. */
-export type AgentFooterProvider = 'claude' | 'codex';
+export type AgentFooterProvider = 'claude' | 'codex' | 'gemini' | 'opencode';
 export const agentFooterProvider = writable<AgentFooterProvider>('claude');
 export type AgentUsageAuthState = 'unconfigured' | 'checking' | 'valid' | 'invalid';
 export const agentUsageAuthStatus = writable<{
@@ -190,9 +190,14 @@ export async function refreshAgentGitStatus() {
   } catch { /* ignore — not a git repo */ }
 }
 
-export async function refreshAgentContextUsage(sessionId: string, projectPath: string, claudeSessionId: string) {
+export async function refreshAgentContextUsage(
+  sessionId: string,
+  projectPath: string,
+  claudeSessionId: string,
+  provider?: string,
+) {
   try {
-    const usage = await agentGetSessionContextUsage(projectPath, claudeSessionId);
+    const usage = await agentGetSessionContextUsage(projectPath, claudeSessionId, provider);
     agentContextUsage.update(m => { m.set(sessionId, usage); return new Map(m); });
   } catch { /* ignore */ }
 }

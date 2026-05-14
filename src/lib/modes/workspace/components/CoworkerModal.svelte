@@ -40,6 +40,9 @@
 
   const PROVIDER_OPTIONS = [
     { id: 'claude', label: 'Claude', color: '#d4a96a' },
+    { id: 'codex', label: 'Codex', color: '#10a37f' },
+    { id: 'gemini', label: 'Gemini', color: '#3186ff' },
+    { id: 'opencode', label: 'OpenCode', color: '#f1ecec' },
   ];
 
   /** Available styles + their human labels for the picker. Only the
@@ -173,7 +176,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="cm-overlay" use:teleportToBody onclick={() => { show = false; onclose?.(); }}>
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="cm-modal" onclick={(e) => e.stopPropagation()}>
+    <div class="cm-modal glass-surface" onclick={(e) => e.stopPropagation()}>
       <div class="cm-head">
         <h2>{isEdit ? 'Edit coworker' : 'New coworker'}</h2>
         <button class="cm-x" onclick={() => { show = false; onclose?.(); }}>×</button>
@@ -292,7 +295,7 @@
     width: 540px;
     max-width: 92%;
     max-height: 92vh;
-    background: var(--n, #0d1117);
+    background: var(--modal-bg, #0d1117);
     border: 1px solid var(--b1);
     border-radius: 10px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);

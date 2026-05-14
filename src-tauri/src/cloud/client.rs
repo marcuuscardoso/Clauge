@@ -84,11 +84,64 @@ pub async fn refresh_google(
     .await
 }
 
+// ─── Refresh-and-retry wrapper ──────────────────────────────────────────────
+//
+// Every auth-required endpoint runs through this wrapper. When the
+// Worker returns 401 (id_token expired / signature invalid), we:
+//   1. If the active provider is Google AND we have a refresh token,
+//      call /api/auth/google/refresh and persist the rotated id_token.
+//   2. Retry the original op exactly once.
+//   3. Either retry succeeds → return its result, or it 401s again →
+//      collapse to `CloudError::NotAuthenticated` so callers can clear
+//      auth and surface a re-login UI cleanly.
+// For non-Google providers (GitHub today), 401 always means "re-login
+// required" — there's no refresh flow — so we collapse to
+// NotAuthenticated immediately. Network / 5xx errors are propagated
+// as-is so the caller can keep partial state and try again later.
+
+async fn with_google_refresh_retry<T, F, Fut>(
+    pool: &SqlitePool,
+    state: &AuthState,
+    mut op: F,
+) -> Result<T, CloudError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, CloudError>>,
+{
+    let first = op().await;
+    let is_unauth = matches!(&first, Err(CloudError::Server { status: 401, .. }));
+    if !is_unauth {
+        return first;
+    }
+    let provider = state.snapshot().active_provider;
+    if provider.as_deref() != Some("google") {
+        // No refresh path → caller must re-login. Drop the verbose
+        // server body in favour of the canonical signal.
+        return Err(CloudError::NotAuthenticated);
+    }
+    if crate::cloud::auth::refresh_google_and_store(state, pool)
+        .await
+        .is_err()
+    {
+        return Err(CloudError::NotAuthenticated);
+    }
+    let retry = op().await;
+    if matches!(&retry, Err(CloudError::Server { status: 401, .. })) {
+        return Err(CloudError::NotAuthenticated);
+    }
+    retry
+}
+
 // ─── Auth-required endpoints ────────────────────────────────────────────────
 
 pub async fn me(pool: &SqlitePool, state: &AuthState) -> Result<MeResponse, CloudError> {
-    let (token, provider) = state.active_token_and_provider().ok_or(CloudError::NotAuthenticated)?;
-    get_json(pool, "/api/auth/me", &token, &provider).await
+    with_google_refresh_retry(pool, state, || async {
+        let (token, provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        get_json(pool, "/api/auth/me", &token, &provider).await
+    })
+    .await
 }
 
 pub async fn update_profile(
@@ -98,24 +151,29 @@ pub async fn update_profile(
     first_name: Option<String>,
     last_name: Option<String>,
 ) -> Result<MeResponse, CloudError> {
-    let (token, provider) = state.active_token_and_provider().ok_or(CloudError::NotAuthenticated)?;
-    let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
-    let url = format!("{}{}", API_BASE_URL, "/api/auth/me");
-    // Only include fields the caller passed — `null` clears, missing = leave alone.
-    let mut body = serde_json::Map::new();
-    if let Some(v) = display_name { body.insert("displayName".into(), serde_json::Value::String(v)); }
-    if let Some(v) = first_name   { body.insert("firstName".into(),   serde_json::Value::String(v)); }
-    if let Some(v) = last_name    { body.insert("lastName".into(),    serde_json::Value::String(v)); }
-    let resp = client
-        .patch(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("X-Provider", provider)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::Value::Object(body))
-        .send()
-        .await
-        .map_err(|e| CloudError::Network(e.to_string()))?;
-    check_ok(resp).await
+    with_google_refresh_retry(pool, state, || async {
+        let (token, provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
+        let url = format!("{}{}", API_BASE_URL, "/api/auth/me");
+        // Only include fields the caller passed — `null` clears, missing = leave alone.
+        let mut body = serde_json::Map::new();
+        if let Some(ref v) = display_name { body.insert("displayName".into(), serde_json::Value::String(v.clone())); }
+        if let Some(ref v) = first_name   { body.insert("firstName".into(),   serde_json::Value::String(v.clone())); }
+        if let Some(ref v) = last_name    { body.insert("lastName".into(),    serde_json::Value::String(v.clone())); }
+        let resp = client
+            .patch(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Provider", provider)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await
+            .map_err(|e| CloudError::Network(e.to_string()))?;
+        check_ok(resp).await
+    })
+    .await
 }
 
 pub async fn delete_account(
@@ -123,18 +181,23 @@ pub async fn delete_account(
     state: &AuthState,
     confirm_slug: &str,
 ) -> Result<(), CloudError> {
-    let (token, provider) = state.active_token_and_provider().ok_or(CloudError::NotAuthenticated)?;
-    let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
-    let url = format!("{}{}", API_BASE_URL, "/api/auth/me");
-    let resp = client
-        .delete(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("X-Provider", provider)
-        .header("X-Confirm", confirm_slug)
-        .send()
-        .await
-        .map_err(|e| CloudError::Network(e.to_string()))?;
-    check_ok(resp).await.map(|_: serde_json::Value| ())
+    with_google_refresh_retry(pool, state, || async {
+        let (token, provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
+        let url = format!("{}{}", API_BASE_URL, "/api/auth/me");
+        let resp = client
+            .delete(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Provider", provider)
+            .header("X-Confirm", confirm_slug)
+            .send()
+            .await
+            .map_err(|e| CloudError::Network(e.to_string()))?;
+        check_ok(resp).await.map(|_: serde_json::Value| ())
+    })
+    .await
 }
 
 pub async fn link(
@@ -144,15 +207,18 @@ pub async fn link(
     code: &str,
     redirect_uri: Option<&str>,
 ) -> Result<MeResponse, CloudError> {
-    let (token, active_provider) = state
-        .active_token_and_provider()
-        .ok_or(CloudError::NotAuthenticated)?;
-    let body = serde_json::json!({
-        "provider": provider,
-        "code": code,
-        "redirectUri": redirect_uri.unwrap_or("https://clauge.in/auth/google-callback.html"),
-    });
-    post_json_auth(pool, "/api/auth/link", body, &token, &active_provider).await
+    with_google_refresh_retry(pool, state, || async {
+        let (token, active_provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        let body = serde_json::json!({
+            "provider": provider,
+            "code": code,
+            "redirectUri": redirect_uri.unwrap_or("https://clauge.in/auth/google-callback.html"),
+        });
+        post_json_auth(pool, "/api/auth/link", body, &token, &active_provider).await
+    })
+    .await
 }
 
 pub async fn unlink(
@@ -160,16 +226,19 @@ pub async fn unlink(
     state: &AuthState,
     provider: &str,
 ) -> Result<MeResponse, CloudError> {
-    let (token, active_provider) = state
-        .active_token_and_provider()
-        .ok_or(CloudError::NotAuthenticated)?;
-    post_json_auth(
-        pool,
-        "/api/auth/unlink",
-        serde_json::json!({ "provider": provider }),
-        &token,
-        &active_provider,
-    )
+    with_google_refresh_retry(pool, state, || async {
+        let (token, active_provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        post_json_auth(
+            pool,
+            "/api/auth/unlink",
+            serde_json::json!({ "provider": provider }),
+            &token,
+            &active_provider,
+        )
+        .await
+    })
     .await
 }
 
@@ -179,8 +248,13 @@ pub async fn sync_state(
     pool: &SqlitePool,
     state: &AuthState,
 ) -> Result<Vec<SyncStateRow>, CloudError> {
-    let (token, provider) = state.active_token_and_provider().ok_or(CloudError::NotAuthenticated)?;
-    get_json(pool, "/api/sync/state", &token, &provider).await
+    with_google_refresh_retry(pool, state, || async {
+        let (token, provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        get_json(pool, "/api/sync/state", &token, &provider).await
+    })
+    .await
 }
 
 pub async fn sync_pull(
@@ -188,9 +262,14 @@ pub async fn sync_pull(
     state: &AuthState,
     kind: &str,
 ) -> Result<SyncPullResponse, CloudError> {
-    let (token, provider) = state.active_token_and_provider().ok_or(CloudError::NotAuthenticated)?;
-    let path = format!("/api/sync/pull/{}", kind);
-    get_json(pool, &path, &token, &provider).await
+    with_google_refresh_retry(pool, state, || async {
+        let (token, provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        let path = format!("/api/sync/pull/{}", kind);
+        get_json(pool, &path, &token, &provider).await
+    })
+    .await
 }
 
 /// Push a kind blob with optimistic concurrency.
@@ -211,61 +290,72 @@ pub async fn sync_push(
     payload_b64: &str,
     prev_hash: Option<&str>,
 ) -> Result<SyncPushResponse, CloudError> {
-    let (token, provider) = state.active_token_and_provider().ok_or(CloudError::NotAuthenticated)?;
-    let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
-    let url = format!("{}{}/{}", API_BASE_URL, "/api/sync/push", kind);
+    with_google_refresh_retry(pool, state, || async {
+        let (token, provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
+        let url = format!("{}{}/{}", API_BASE_URL, "/api/sync/push", kind);
 
-    let mut body = serde_json::Map::new();
-    body.insert("contentHash".into(), serde_json::Value::String(content_hash.into()));
-    body.insert("payload".into(), serde_json::Value::String(payload_b64.into()));
-    if let Some(p) = prev_hash {
-        body.insert("prevHash".into(), serde_json::Value::String(p.into()));
-    }
-
-    let resp = client
-        .put(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("X-Provider", provider)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::Value::Object(body))
-        .send()
-        .await
-        .map_err(|e| CloudError::Network(e.to_string()))?;
-
-    // 412 → conflict. Parse the body to surface the current remote hash so
-    // the resolver can show "this device vs other device" stats.
-    if resp.status().as_u16() == 412 {
-        #[derive(serde::Deserialize)]
-        struct ConflictBody {
-            #[serde(rename = "currentHash")] current_hash: Option<String>,
-            #[serde(rename = "currentUpdatedAt")] current_updated_at: Option<String>,
+        let mut body = serde_json::Map::new();
+        body.insert("contentHash".into(), serde_json::Value::String(content_hash.into()));
+        body.insert("payload".into(), serde_json::Value::String(payload_b64.into()));
+        if let Some(p) = prev_hash {
+            body.insert("prevHash".into(), serde_json::Value::String(p.into()));
         }
-        let body: ConflictBody = resp.json().await.unwrap_or(ConflictBody {
-            current_hash: None,
-            current_updated_at: None,
-        });
-        return Err(CloudError::Conflict {
-            current_hash: body.current_hash,
-            current_updated_at: body.current_updated_at,
-        });
-    }
 
-    check_ok(resp).await
+        let resp = client
+            .put(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Provider", provider)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .await
+            .map_err(|e| CloudError::Network(e.to_string()))?;
+
+        // 412 → conflict. Parse the body to surface the current
+        // remote hash so the resolver can show "this device vs
+        // other device" stats.
+        if resp.status().as_u16() == 412 {
+            #[derive(serde::Deserialize)]
+            struct ConflictBody {
+                #[serde(rename = "currentHash")] current_hash: Option<String>,
+                #[serde(rename = "currentUpdatedAt")] current_updated_at: Option<String>,
+            }
+            let body: ConflictBody = resp.json().await.unwrap_or(ConflictBody {
+                current_hash: None,
+                current_updated_at: None,
+            });
+            return Err(CloudError::Conflict {
+                current_hash: body.current_hash,
+                current_updated_at: body.current_updated_at,
+            });
+        }
+
+        check_ok(resp).await
+    })
+    .await
 }
 
 pub async fn sync_wipe(pool: &SqlitePool, state: &AuthState) -> Result<(), CloudError> {
-    let (token, provider) = state.active_token_and_provider().ok_or(CloudError::NotAuthenticated)?;
-    let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
-    let url = format!("{}{}", API_BASE_URL, "/api/sync/wipe");
-    let resp = client
-        .delete(url)
-        .header("Authorization", format!("Bearer {}", token))
-        .header("X-Provider", provider)
-        .header("X-Confirm", "yes")
-        .send()
-        .await
-        .map_err(|e| CloudError::Network(e.to_string()))?;
-    check_ok(resp).await.map(|_: serde_json::Value| ())
+    with_google_refresh_retry(pool, state, || async {
+        let (token, provider) = state
+            .active_token_and_provider()
+            .ok_or(CloudError::NotAuthenticated)?;
+        let client = build_app_http_client(pool).await.map_err(CloudError::Network)?;
+        let url = format!("{}{}", API_BASE_URL, "/api/sync/wipe");
+        let resp = client
+            .delete(url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Provider", provider)
+            .header("X-Confirm", "yes")
+            .send()
+            .await
+            .map_err(|e| CloudError::Network(e.to_string()))?;
+        check_ok(resp).await.map(|_: serde_json::Value| ())
+    })
+    .await
 }
 
 // ─── Internals ──────────────────────────────────────────────────────────────

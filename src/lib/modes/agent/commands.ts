@@ -21,6 +21,8 @@ export const agentCreateSession = (params: {
   customPrompt?: string;
   gitName?: string;
   gitEmail?: string;
+  /** 'claude' | 'codex' | 'opencode'. Omit for Claude default. */
+  provider?: string;
 }) => invoke<AgentSession>('agent_create_session', params);
 export const agentUpdateSession = (params: {
   id: string;
@@ -42,7 +44,8 @@ export const agentDeleteContext = (id: string) => invoke<void>('agent_delete_con
 export const agentGetSessionContexts = (sessionId: string) => invoke<AgentContext[]>('agent_get_session_contexts', { sessionId });
 export const agentAttachContext = (sessionId: string, contextId: string) => invoke<void>('agent_attach_context', { sessionId, contextId });
 export const agentDetachContext = (sessionId: string, contextId: string) => invoke<void>('agent_detach_context', { sessionId, contextId });
-export const agentInjectContexts = (projectPath: string, contextIds: string[]) => invoke<void>('agent_inject_contexts', { projectPath, contextIds });
+export const agentInjectContexts = (projectPath: string, contextIds: string[], provider?: string) =>
+  invoke<void>('agent_inject_contexts', { projectPath, contextIds, provider });
 export const agentRemoveInjectedContexts = (projectPath: string) => invoke<void>('agent_remove_injected_contexts', { projectPath });
 
 // Terminal
@@ -53,6 +56,12 @@ export const agentSpawnTerminal = (params: {
   skipPermissions?: boolean;
   gitName?: string;
   gitEmail?: string;
+  /** Which CLI to spawn — 'claude' | 'codex' | 'opencode'. Defaults to Claude. */
+  provider?: string;
+  /** Workspace MCP bearer token; only consumed when provider === 'codex'.
+   *  Lets codex authenticate to the workspace MCP without writing the
+   *  token to ~/.codex/config.toml. Pass undefined when MCP is off. */
+  workspaceMcpToken?: string;
   onOutput: any;
 }) => invoke<string>('agent_spawn_terminal', params);
 export const agentSpawnShell = (projectPath: string, onOutput: any) => invoke<string>('agent_spawn_shell', { projectPath, onOutput });
@@ -82,20 +91,36 @@ export const agentGitStashPop = (projectPath: string) => invoke<string>('agent_g
 export const agentGitListBranches = (projectPath: string) => invoke<any[]>('agent_git_list_branches', { projectPath });
 export const agentGitSwitchBranch = (projectPath: string, branchName: string) => invoke<void>('agent_git_switch_branch', { projectPath, branchName });
 
-// Plugins
-export const agentGetPlugins = () => invoke<ClaudePlugin[]>('agent_get_plugins');
-export const agentTogglePlugin = (pluginKey: string, enabled: boolean) => invoke<void>('agent_toggle_plugin', { pluginKey, enabled });
-export const agentGetMarketplacePlugins = () => invoke<MarketplacePlugin[]>('agent_get_marketplace_plugins');
-export const agentInstallPlugin = (name: string, marketplace: string) => invoke<void>('agent_install_plugin', { name, marketplace });
-export const agentUninstallPlugin = (name: string, marketplace: string) => invoke<void>('agent_uninstall_plugin', { name, marketplace });
+// Plugins — `provider` selects which CLI's plugin universe to query
+// ('claude' | 'codex'). OpenCode returns an empty list since it uses npm.
+// Omit for the legacy Claude-only path.
+export const agentGetPlugins = (provider?: string) => invoke<ClaudePlugin[]>('agent_get_plugins', { provider });
+export const agentTogglePlugin = (pluginKey: string, enabled: boolean, provider?: string) =>
+  invoke<void>('agent_toggle_plugin', { provider, pluginKey, enabled });
+export const agentGetMarketplacePlugins = (provider?: string) =>
+  invoke<MarketplacePlugin[]>('agent_get_marketplace_plugins', { provider });
+export const agentInstallPlugin = (name: string, marketplace: string, provider?: string) =>
+  invoke<void>('agent_install_plugin', { provider, name, marketplace });
+export const agentUninstallPlugin = (name: string, marketplace: string, provider?: string) =>
+  invoke<void>('agent_uninstall_plugin', { provider, name, marketplace });
+
+// Check whether a given provider's CLI binary is installed on PATH.
+// Drives the provider picker's disabled state.
+export const agentCheckCliInstalled = (provider: string) =>
+  invoke<boolean>('agent_check_cli_installed', { provider });
 
 // Usage
-export const agentGetUsageAnalytics = (days?: number) => invoke<UsageAnalytics>('agent_get_usage_analytics', { days });
+export const agentGetUsageAnalytics = (days?: number, provider?: string) =>
+  invoke<UsageAnalytics>('agent_get_usage_analytics', { days, provider });
 export const agentFetchUsageLimits = (sessionKey: string) => invoke<any>('agent_fetch_usage_limits', { sessionKey });
 export const agentFetchCodexUsageLimits = (accessToken: string) => invoke<any>('agent_fetch_codex_usage_limits', { accessToken });
-export const agentDiscoverSessions = (projectPath: string) => invoke<DiscoveredSession[]>('agent_discover_sessions', { projectPath });
+export const agentDiscoverSessions = (projectPath: string, provider?: string) =>
+  invoke<DiscoveredSession[]>('agent_discover_sessions', { projectPath, provider });
+export const agentResolveResumeId = (projectPath: string, provider?: string) =>
+  invoke<string | null>('agent_resolve_resume_id', { projectPath, provider });
 export const agentGetSessionTokens = (projectPath: string, sessionId?: string) => invoke<TokenUsage>('agent_get_session_tokens', { projectPath, sessionId });
-export const agentGetSessionContextUsage = (projectPath: string, sessionId: string) => invoke<ContextUsage>('agent_get_session_context_usage', { projectPath, sessionId });
+export const agentGetSessionContextUsage = (projectPath: string, sessionId: string, provider?: string) =>
+  invoke<ContextUsage>('agent_get_session_context_usage', { projectPath, sessionId, provider });
 
 // System
 export const agentUpdateTrayTitle = (title: string) => invoke<void>('agent_update_tray_title', { title });

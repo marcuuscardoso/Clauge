@@ -37,7 +37,7 @@
 
 {#if show}
   <div class="ssh-modal-backdrop" role="presentation" onclick={onCancel}>
-    <div class="ssh-modal" role="dialog" aria-modal="true" aria-labelledby="ssh-confirm-title" onclick={(e) => e.stopPropagation()}>
+    <div class="ssh-modal glass-surface" role="dialog" aria-modal="true" aria-labelledby="ssh-confirm-title" onclick={(e) => e.stopPropagation()}>
       <header class="ssh-modal-header">
         <span class="ssh-modal-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -86,7 +86,7 @@
   .ssh-modal {
     width: 100%;
     max-width: 540px;
-    background: var(--n);
+    background: var(--modal-bg, var(--n));
     border: 1px solid var(--b1);
     border-radius: var(--radius-lg, 10px);
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);

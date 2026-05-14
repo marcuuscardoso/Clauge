@@ -1,5 +1,5 @@
 use crate::modes::agent::models::{TerminalEntry, TerminalOutputPayload, TerminalState};
-use crate::shared::cli::{claude::CLAUDE, runner::{CliRunner, SpawnOpts}};
+use crate::shared::cli::{registry::runner_for, runner::{CliRunner, SpawnOpts}};
 use crate::shared::platform::shell::default_user_shell;
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -33,6 +33,14 @@ pub fn agent_spawn_terminal(
     skip_permissions: Option<bool>,
     git_name: Option<String>,
     git_email: Option<String>,
+    provider: Option<String>,
+    // Workspace MCP bearer token. Only used when `provider == "codex"`
+    // — injected into the spawned shell's env as
+    // `CLAUGE_WORKSPACE_TOKEN`, which codex reads via the
+    // `--bearer-token-env-var` flag we set at registration time. The
+    // frontend reads this off the workspace store; pass `None` when
+    // MCP isn't enabled (codex still works for non-MCP turns).
+    workspace_mcp_token: Option<String>,
     on_output: Channel<TerminalOutputPayload>,
 ) -> Result<String, String> {
     let terminal_id = Uuid::new_v4().to_string();
@@ -41,7 +49,10 @@ pub fn agent_spawn_terminal(
         .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
-    let cli: &dyn CliRunner = &CLAUDE;
+    // Provider is passed in from the frontend (which reads it off the
+    // session row). Unknown / missing → Claude via runner_for's default.
+    let provider = provider.unwrap_or_else(|| "claude".to_string());
+    let cli: &dyn CliRunner = runner_for(&provider);
     let spawn_cmd = cli.build_spawn_command(&SpawnOpts {
         resume_session_id: session_id,
         system_prompt: context_prompt,
@@ -62,6 +73,20 @@ pub fn agent_spawn_terminal(
     cmd.env("TERM", "xterm-256color");
     if let Some(ref name) = git_name { cmd.env("GIT_AUTHOR_NAME", name); cmd.env("GIT_COMMITTER_NAME", name); }
     if let Some(ref email) = git_email { cmd.env("GIT_AUTHOR_EMAIL", email); cmd.env("GIT_COMMITTER_EMAIL", email); }
+
+    // Codex registers the workspace MCP with `--bearer-token-env-var
+    // CLAUGE_WORKSPACE_TOKEN` (see modes/workspace/commands.rs
+    // ::register_codex). Inject the persisted token into the env
+    // exactly when we're spawning codex, so codex can authenticate
+    // without the token ever touching ~/.codex/config.toml.
+    if provider == "codex" {
+        if let Some(token) = workspace_mcp_token.as_ref().filter(|t| !t.is_empty()) {
+            cmd.env(
+                crate::modes::workspace::commands::CODEX_BEARER_ENV,
+                token,
+            );
+        }
+    }
 
     let child = pty_pair.slave.spawn_command(cmd).map_err(|e| format!("Failed to spawn {}: {}", cli.id(), e))?;
     let writer = pty_pair.master.take_writer().map_err(|e| format!("Failed to get PTY writer: {}", e))?;

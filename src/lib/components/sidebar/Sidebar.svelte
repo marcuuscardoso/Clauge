@@ -175,7 +175,14 @@
         loadSqlScripts(),
       ]);
       markSynced();
-      showToast('Restored from cloud', 'success');
+      // The post-restore banner subsumes the success toast when there
+      // are credentials to re-enter — its copy already says "Restored
+      // from cloud" up front, and stacking both would be noisy. We only
+      // toast when the banner doesn't fire (clean restore, nothing to
+      // remind the user about).
+      const { announceRestoreCompletion } = await import('$lib/stores/missingCredentials');
+      const shown = await announceRestoreCompletion();
+      if (!shown) showToast('Restored from cloud', 'success');
     } catch (e: any) {
       showToast(friendlyError(e), 'error');
     } finally {

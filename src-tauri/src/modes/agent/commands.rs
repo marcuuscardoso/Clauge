@@ -1,5 +1,5 @@
 use crate::modes::agent::models::{AgentContext, AgentSession};
-use crate::shared::cli::{claude::CLAUDE, runner::CliRunner};
+use crate::shared::cli::{registry::runner_for, runner::CliRunner};
 use crate::shared::repos::sessions as sessions_repo;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -20,12 +20,20 @@ pub async fn agent_create_session(
     title: String, purpose: String, project_path: String,
     skip_permissions: Option<bool>, custom_prompt: Option<String>,
     git_name: Option<String>, git_email: Option<String>,
+    provider: Option<String>,
 ) -> Result<AgentSession, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let project_name = project_name_from_path(&project_path);
     let context_prompt = custom_prompt.unwrap_or_default();
     let skip = if skip_permissions.unwrap_or(false) { 1 } else { 0 };
+    // Default to Claude when the frontend doesn't pass a provider —
+    // preserves behaviour for legacy callers; unknown ids also fall
+    // back via `runner_for`. The string is persisted as-is so future
+    // providers slot in without a column change.
+    let provider = provider
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| "claude".to_string());
     sessions_repo::insert_session(
         pool.inner(),
         &id,
@@ -39,11 +47,24 @@ pub async fn agent_create_session(
         git_email.as_deref(),
         &now,
         &now,
+        &provider,
     )
     .await
     .map_err(|e| e.to_string())?;
     // Sessions are machine-local — only agent_contexts travel through
     // cloud sync, so no `bump("agent")` here.
+
+    // Lazy MCP registration for non-Claude providers. Boot does NOT
+    // auto-register these (would touch ~/.codex/config.toml or
+    // ~/.config/opencode/opencode.json for every alpha tester who has
+    // those CLIs but uses Clauge as Claude-only). Triggered here so the
+    // user has explicitly opted in by creating a session in that
+    // provider. Best-effort; silent on failure.
+    crate::modes::workspace::commands::ensure_provider_mcp_registered(
+        pool.inner(),
+        &provider,
+    ).await;
+
     sessions_repo::get_session_by_id(pool.inner(), &id).await.map_err(|e| e.to_string())
 }
 
@@ -133,8 +154,62 @@ pub async fn agent_detach_context(pool: State<'_, SqlitePool>, session_id: Strin
     sessions_repo::detach_context_from_session(pool.inner(), &session_id, &context_id).await.map_err(|e| e.to_string())
 }
 
+// Each CLI reads its own project-level context file. Inject writes to
+// exactly one file based on the session's provider so we don't pollute
+// the user's repo with files no agent will read. Remove cleans the
+// marker block from every known file defensively — handles the case
+// where the user attached the same context to sessions under
+// different providers in the same project.
+const CTX_MARKER_START: &str = "<!-- CLAUGE-CONTEXT-START -->";
+const CTX_MARKER_END: &str = "<!-- CLAUGE-CONTEXT-END -->";
+const ALL_CONTEXT_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md", "GEMINI.md"];
+
+fn context_file_for(provider: &str) -> &'static str {
+    match provider {
+        "codex" | "opencode" => "AGENTS.md",
+        "gemini" => "GEMINI.md",
+        _ => "CLAUDE.md",
+    }
+}
+
+fn write_injected_context(path: &PathBuf, contexts: &[(String, String)]) -> Result<(), String> {
+    let existing_content = if path.exists() {
+        let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if let (Some(start), Some(_end)) = (raw.find(CTX_MARKER_START), raw.find(CTX_MARKER_END)) {
+            raw[..start].trim_end().to_string()
+        } else {
+            raw
+        }
+    } else {
+        String::new()
+    };
+
+    // Filter out snippets whose content already exists in the file
+    let mut filtered = String::new();
+    for (name, content) in contexts {
+        if !existing_content.contains(content.trim()) {
+            if !filtered.is_empty() { filtered.push_str("\n\n---\n\n"); }
+            filtered.push_str(&format!("## {}\n\n{}", name, content));
+        }
+    }
+    if filtered.is_empty() { return Ok(()); }
+
+    let injected = format!("\n\n{}\n{}\n{}\n", CTX_MARKER_START, filtered, CTX_MARKER_END);
+    if !existing_content.is_empty() {
+        std::fs::write(path, format!("{}{}", existing_content.trim_end(), injected)).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::write(path, filtered).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
-pub async fn agent_inject_contexts(pool: State<'_, SqlitePool>, project_path: String, context_ids: Vec<String>) -> Result<(), String> {
+pub async fn agent_inject_contexts(
+    pool: State<'_, SqlitePool>,
+    project_path: String,
+    context_ids: Vec<String>,
+    provider: Option<String>,
+) -> Result<(), String> {
     if context_ids.is_empty() { return Ok(()); }
 
     // Fetch context content from DB by ID
@@ -149,60 +224,37 @@ pub async fn agent_inject_contexts(pool: State<'_, SqlitePool>, project_path: St
     }
     if contexts.is_empty() { return Ok(()); }
 
-    let claude_md_path = PathBuf::from(&project_path).join("CLAUDE.md");
-    let marker_start = "<!-- CLAUGE-CONTEXT-START -->";
-    let marker_end = "<!-- CLAUGE-CONTEXT-END -->";
-
-    let existing_content = if claude_md_path.exists() {
-        let raw = std::fs::read_to_string(&claude_md_path).map_err(|e| e.to_string())?;
-        if let (Some(start), Some(_end)) = (raw.find(marker_start), raw.find(marker_end)) {
-            raw[..start].trim_end().to_string()
-        } else {
-            raw
-        }
-    } else {
-        String::new()
-    };
-
-    // Filter out snippets whose content already exists in the file
-    let mut filtered = String::new();
-    for (name, content) in &contexts {
-        if !existing_content.contains(content.trim()) {
-            if !filtered.is_empty() { filtered.push_str("\n\n---\n\n"); }
-            filtered.push_str(&format!("## {}\n\n{}", name, content));
-        }
-    }
-    if filtered.is_empty() { return Ok(()); }
-
-    let injected = format!("\n\n{}\n{}\n{}\n", marker_start, filtered, marker_end);
-
-    if !existing_content.is_empty() {
-        std::fs::write(&claude_md_path, format!("{}{}", existing_content.trim_end(), injected)).map_err(|e| e.to_string())?;
-    } else {
-        std::fs::write(&claude_md_path, filtered).map_err(|e| e.to_string())?;
-    }
-
-    Ok(())
+    // Write to the single file the session's CLI actually reads.
+    // Claude → CLAUDE.md, Codex / OpenCode → AGENTS.md.
+    let filename = context_file_for(provider.as_deref().unwrap_or("claude"));
+    let path = PathBuf::from(&project_path).join(filename);
+    write_injected_context(&path, &contexts)
 }
 
 #[tauri::command]
 pub fn agent_remove_injected_contexts(project_path: String) -> Result<(), String> {
-    let claude_md_path = PathBuf::from(&project_path).join("CLAUDE.md");
-    if !claude_md_path.exists() { return Ok(()); }
+    // Defensive sweep: if the user attached contexts under one provider
+    // then later switched the session's provider, the previous file
+    // would otherwise be orphaned. Clean every known context file's
+    // marker block — no-op on files that don't exist.
+    for filename in ALL_CONTEXT_FILES {
+        let path = PathBuf::from(&project_path).join(filename);
+        if !path.exists() { continue; }
 
-    let content = std::fs::read_to_string(&claude_md_path).map_err(|e| e.to_string())?;
-    let marker_start = "<!-- CLAUGE-CONTEXT-START -->";
-    let marker_end = "<!-- CLAUGE-CONTEXT-END -->";
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
 
-    if let (Some(start), Some(end)) = (content.find(marker_start), content.find(marker_end)) {
-        let cleaned = format!("{}{}", &content[..start].trim_end(), &content[end + marker_end.len()..]);
-        if cleaned.trim().is_empty() {
-            let _ = std::fs::remove_file(&claude_md_path);
-        } else {
-            std::fs::write(&claude_md_path, cleaned.trim_end().to_string() + "\n").map_err(|e| e.to_string())?;
+        if let (Some(start), Some(end)) = (content.find(CTX_MARKER_START), content.find(CTX_MARKER_END)) {
+            let cleaned = format!("{}{}", &content[..start].trim_end(), &content[end + CTX_MARKER_END.len()..]);
+            if cleaned.trim().is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                std::fs::write(&path, cleaned.trim_end().to_string() + "\n").map_err(|e| e.to_string())?;
+            }
         }
     }
-
     Ok(())
 }
 
@@ -216,9 +268,19 @@ pub fn agent_update_tray_title(app_handle: tauri::AppHandle, title: String) -> R
 
 #[tauri::command]
 pub fn agent_check_claude_installed() -> bool {
-    let cli: &dyn CliRunner = &CLAUDE;
-    // resolve_binary_path returns the bare binary name if `which`/`where.exe` fails.
-    // A resolved absolute path means the binary exists on PATH.
+    // Preserved as a Claude-specific name for the original callers; the
+    // provider-aware variant below is the new shape going forward.
+    let cli: &dyn CliRunner = runner_for("claude");
+    cli.resolve_binary_path() != cli.binary_name()
+}
+
+#[tauri::command]
+pub fn agent_check_cli_installed(provider: String) -> bool {
+    // Used by the provider picker (NewSessionModal / coworker modal) to
+    // grey out CLIs that aren't on PATH. `resolve_binary_path` returns
+    // the bare binary name when `which` / `where.exe` fails, so a
+    // distinct absolute path means the binary is installed.
+    let cli: &dyn CliRunner = runner_for(&provider);
     cli.resolve_binary_path() != cli.binary_name()
 }
 

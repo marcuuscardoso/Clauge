@@ -851,6 +851,7 @@
   .rt-stats {
     flex: 1;
     overflow: auto;
+    overscroll-behavior: none;
     padding: 0;
     font-family: var(--mono);
     font-size: 12.5px;
@@ -905,7 +906,11 @@
   }
 
   /* Scroll area */
-  .rt-scroll { flex: 1; overflow: auto; }
+  /* `overscroll-behavior: none` kills the WebKit/macOS rubber-band
+   * bounce when scrolling past the top or bottom of the results. The
+   * default elastic overscroll reads as "web page", not "desktop app";
+   * suppressing it makes fast scrolls stop crisply at the boundary. */
+  .rt-scroll { flex: 1; overflow: auto; overscroll-behavior: none; }
   .rt-scroll.resizing { user-select: none; }
   .rt-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
   .rt-scroll::-webkit-scrollbar-thumb { background: var(--b1); border-radius: 2px; }

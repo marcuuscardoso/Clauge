@@ -18,7 +18,18 @@ export interface AgentSession {
   origin: string;
   /** Backref to the card that owns this hidden session. null otherwise. */
   cardId: string | null;
+  /** 'claude' | 'codex' | 'gemini' | 'opencode'. */
+  provider: string;
 }
+
+/** Provider ids that map to a `CliRunner` in `runner_for`. */
+export type AgentProvider = 'claude' | 'codex' | 'gemini' | 'opencode';
+export const AGENT_PROVIDERS: { id: AgentProvider; label: string }[] = [
+  { id: 'claude', label: 'Claude' },
+  { id: 'codex', label: 'Codex' },
+  { id: 'gemini', label: 'Gemini' },
+  { id: 'opencode', label: 'OpenCode' },
+];
 
 export interface AgentContext {
   id: string;

@@ -37,12 +37,22 @@
   component but no active resources (terminals only spawn when the user
   opens a session inside that mode).
 -->
+<!--
+  When Settings is the active tab, ALL mode panels are forced inactive
+  (visibility: hidden). The mode store ($mode) intentionally stays at
+  the user's real mode so the "+" button / AI panel / sidebar selection
+  stay correct — only the panel's `active` class is gated. In solid
+  themes this didn't matter (opaque mode panel + opaque Settings panel
+  on top = Settings covers everything). In glass mode both panels are
+  rgba, so the underlying mode panel was bleeding through Settings,
+  making text + icons illegible.
+-->
 <div class="workspace">
-  <div class="panel" class:active={$mode === 'agent'}>
+  <div class="panel" class:active={$mode === 'agent' && !settingsActive}>
     <AgentPanel />
   </div>
 
-  <div class="panel" class:active={$mode === 'history'}>
+  <div class="panel" class:active={$mode === 'history' && !settingsActive}>
     {#if $activeHistoryEntry}
       <HistoryViewer />
     {:else}
@@ -53,27 +63,27 @@
     {/if}
   </div>
 
-  <div class="panel" class:active={$mode === 'rest'}>
+  <div class="panel" class:active={$mode === 'rest' && !settingsActive}>
     <RestPanel />
   </div>
 
-  <div class="panel" class:active={$mode === 'sql'}>
+  <div class="panel" class:active={$mode === 'sql' && !settingsActive}>
     <SqlPanel />
   </div>
 
-  <div class="panel" class:active={$mode === 'nosql'}>
+  <div class="panel" class:active={$mode === 'nosql' && !settingsActive}>
     <NoSqlPanel />
   </div>
 
-  <div class="panel" class:active={$mode === 'ssh'}>
+  <div class="panel" class:active={$mode === 'ssh' && !settingsActive}>
     <SshPanel />
   </div>
 
-  <div class="panel" class:active={$mode === 'explorer'}>
+  <div class="panel" class:active={$mode === 'explorer' && !settingsActive}>
     <ExplorerPanel />
   </div>
 
-  <div class="panel" class:active={$mode === 'workspace'}>
+  <div class="panel" class:active={$mode === 'workspace' && !settingsActive}>
     <WorkspacePanel />
   </div>
 

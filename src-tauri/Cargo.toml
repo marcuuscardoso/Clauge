@@ -81,6 +81,7 @@ azure_core = "0.21"
 # `into_secure` flow has typing friction we'll resolve in v2.
 suppaftp = { version = "8", features = ["tokio"] }
 axum = { version = "0.8.4", default-features = false, features = ["tokio", "http1", "json"] }
+toml_edit = "0.25.5"
 # Credential store for Windows + Linux (Win Credential Manager / libsecret).
 # macOS uses a separate shell-out path to /usr/bin/security in
 # shared/platform/credential_store.rs — keeps Keychain access prompts to a

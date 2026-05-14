@@ -20,7 +20,7 @@
     agentSoundEnabled,
     agentDockBounceEnabled,
   } from '../stores';
-  import { getSetting } from '$lib/commands/settings';
+  import { getSetting, setSetting } from '$lib/commands/settings';
   import { tabs as tabsStore, closeTab, activateTab } from '$lib/shared/stores/tabs';
   import {
     agentSpawnTerminal,
@@ -30,6 +30,7 @@
     agentUpdateSessionId,
     agentUpdateLastUsed,
     agentDiscoverSessions,
+    agentResolveResumeId,
     agentIsGitRepo,
     agentCreateWorktree,
     agentUpdateWorktree,
@@ -354,6 +355,7 @@
       fontSize: 13,
       fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", "Menlo", monospace',
       theme: getCurrentTermTheme(),
+      allowTransparency: true,
       scrollback: 10000,
       lineHeight: 1.35,
       smoothScrollDuration: 100,
@@ -681,7 +683,7 @@
       const s = get(activeAgentSession);
       if (!s || s.id !== session.id) { stopContextUsagePolling(); return; }
       if (s.claudeSessionId) {
-        refreshAgentContextUsage(s.id, projectPath, s.claudeSessionId);
+        refreshAgentContextUsage(s.id, projectPath, s.claudeSessionId, s.provider || 'claude');
       }
     }, AGENT_CONTEXT_USAGE_INTERVAL_MS);
   }
@@ -800,12 +802,13 @@
 
       let spawnPath = session.worktreePath || session.projectPath;
 
-      // Inject attached contexts into CLAUDE.md before spawning
+      // Inject attached contexts into the file this CLI actually reads
+      // — CLAUDE.md for Claude, AGENTS.md for Codex / OpenCode.
       try {
         const sessionContexts = await agentGetSessionContexts(session.id);
         if (sessionContexts.length > 0) {
           const contextIds = sessionContexts.map((c: any) => c.id);
-          await agentInjectContexts(spawnPath, contextIds);
+          await agentInjectContexts(spawnPath, contextIds, session.provider || 'claude');
         }
       } catch (_) {}
 
@@ -1071,7 +1074,7 @@
                   const s = get(activeAgentSession);
                   if (s?.claudeSessionId) {
                     const path = s.worktreePath || s.projectPath;
-                    refreshAgentContextUsage(s.id, path, s.claudeSessionId);
+                    refreshAgentContextUsage(s.id, path, s.claudeSessionId, s.provider || 'claude');
                   }
                 }, AGENT_CONTEXT_USAGE_INTERVAL_MS);
               }
@@ -1085,14 +1088,57 @@
       const rawPrompt = getPurposePrompt(session.purpose) || session.contextPrompt || '';
       const purposePrompt = rawPrompt.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
 
+      // Resume-id rehydrate for non-Claude providers. Claude captures
+      // its session id from the PTY banner ("claude --resume <id>") via
+      // extract_resume_id_from_output and persists it as claudeSessionId.
+      // Codex / OpenCode don't print a deterministic marker, so on the
+      // first spawn we have no id. Before any subsequent spawn, query
+      // the CLI's own session store (codex jsonl tree, opencode SQLite)
+      // for the newest matching session and persist its id — that's
+      // the one the user was just on. First-ever spawn: returns null,
+      // fresh session starts as expected. Reset session sets a one-shot
+      // skip flag we honour + clear here so a reset doesn't loop back
+      // to the just-killed session.
+      let resumeId = session.claudeSessionId || undefined;
+      if (!resumeId && session.provider && session.provider !== 'claude') {
+        const skipKey = `agent_skip_rehydrate.${session.id}`;
+        const skip = await getSetting(skipKey).catch(() => null);
+        if (skip === '1') {
+          await setSetting(skipKey, '').catch(() => {});
+        } else {
+          try {
+            const found = await agentResolveResumeId(spawnPath, session.provider);
+            if (found) {
+              resumeId = found;
+              await agentUpdateSessionId(session.id, found);
+              session.claudeSessionId = found;
+            }
+          } catch (e) {
+            console.warn('[TERM] resume-id rehydrate failed', e);
+          }
+        }
+      }
+
       spawning = true;
       const termId = await agentSpawnTerminal({
-        sessionId: session.claudeSessionId || undefined,
+        sessionId: resumeId,
         projectPath: spawnPath,
         contextPrompt: purposePrompt || undefined,
         skipPermissions: session.skipPermissions === 1 || undefined,
         gitName: session.gitName || undefined,
         gitEmail: session.gitEmail || undefined,
+        // Pull the provider off the session row so Codex / OpenCode
+        // sessions launch their own CLI instead of falling back to
+        // Claude. Legacy rows pre-migration-13 have provider='claude'.
+        provider: session.provider || 'claude',
+        // Codex authenticates to the workspace MCP via an env-var
+        // bearer (--bearer-token-env-var CLAUGE_WORKSPACE_TOKEN); pass
+        // the persisted token (read from app settings) so it lands in
+        // the spawned shell's env. No-op for non-codex providers — the
+        // backend gates on `provider == 'codex'`.
+        workspaceMcpToken: (session.provider === 'codex'
+          ? (await getSetting('workspace_mcp_token')) ?? undefined
+          : undefined),
         onOutput,
       });
       console.log(`[TERM] Spawn complete: termId=${termId}, gen=${myGeneration}`);
@@ -1228,6 +1274,16 @@
     // Clear session ID
     agentUpdateSessionId(session.id, '').catch(() => {});
     session.claudeSessionId = null;
+    // For non-Claude providers, the spawn path "rehydrates" the resume
+    // id from the CLI's own session store when claudeSessionId is
+    // empty (so reopening from the side panel resumes the prior chat).
+    // Reset means "start fresh" — set a one-shot flag the next spawn
+    // checks and clears, so the rehydrate is skipped exactly once.
+    // The next spawn after that captures the brand-new CLI session id
+    // and resume works normally again.
+    if (session.provider && session.provider !== 'claude') {
+      setSetting(`agent_skip_rehydrate.${session.id}`, '1').catch(() => {});
+    }
 
     // Remove from maps
     agentTerminalIds.update(m => { m.delete(session.id); return new Map(m); });
@@ -1256,7 +1312,16 @@
     currentSessionId = null;
     activeTermEntry = null;
     activeShellEntry = null;
-    _suppressExit = false; // Reset — killed PTY won't trigger exit detection to clear it
+    // DO NOT clear _suppressExit synchronously — the PTY kill above
+    // is async, so the exit event arrives later. Clearing _suppressExit
+    // here would let the exit handler run with suppression off, set
+    // agentSessionExited[id]=true, close the tab, and surface the
+    // "Session ended" banner on re-open. The exit handler clears
+    // _suppressExit itself once it fires (lines 927 / 1022). Safety
+    // net: a setTimeout clears it after 2s in case the exit event
+    // never arrives (rare PTY edge case) so a future natural exit
+    // isn't incorrectly suppressed.
+    setTimeout(() => { _suppressExit = false; }, 2000);
 
     loadAgentSessions().then(() => {
       selectSession(session);
@@ -1495,10 +1560,19 @@
   <div class="agent-panel" bind:this={wrapperEl}>
     <div class="agent-terminal-main" style="width:{$agentShellOpen ? mainWidth + '%' : '100%'}">
       {#if spawning}
+        {@const _prov = $activeAgentSession?.provider ?? 'claude'}
+        {@const _src = _prov === 'codex' ? '/codex.svg'
+                     : _prov === 'gemini' ? '/gemini.svg'
+                     : _prov === 'opencode' ? '/opencode-dark.svg'
+                     : '/code-in-action.svg'}
+        {@const _name = _prov === 'codex' ? 'Codex'
+                      : _prov === 'gemini' ? 'Gemini'
+                      : _prov === 'opencode' ? 'OpenCode'
+                      : 'Claude Code'}
         <div class="agent-loading">
-          <img src="/code-in-action.svg" alt="" class="loading-mascot" />
+          <img src={_src} alt="" class="loading-mascot" />
           <div class="loading-text">
-            <span class="loading-title">Starting Claude Code</span>
+            <span class="loading-title">Starting {_name}</span>
             <span class="loading-sub">Setting up terminal session<span class="loading-dots"></span></span>
           </div>
         </div>

@@ -1,9 +1,23 @@
 <script lang="ts">
   import Modal from '$lib/shared/primitives/Modal.svelte';
   import ClaudeNotInstalledModal from './ClaudeNotInstalledModal.svelte';
-  import { agentCreateSession, agentDiscoverSessions, agentListContexts, agentAttachContext, agentUpdateSessionId, agentCheckClaudeInstalled } from '../commands';
-  import type { AgentContext, DiscoveredSession } from '../types';
-  import { loadAgentSessions, agentSessions, activeAgentSession } from '../stores';
+  import CodexNotInstalledModal from './CodexNotInstalledModal.svelte';
+  import GeminiNotInstalledModal from './GeminiNotInstalledModal.svelte';
+  import OpenCodeNotInstalledModal from './OpenCodeNotInstalledModal.svelte';
+  import { agentCreateSession, agentDiscoverSessions, agentListContexts, agentAttachContext, agentUpdateSessionId, agentCheckClaudeInstalled, agentCheckCliInstalled } from '../commands';
+  import type { AgentContext, DiscoveredSession, AgentProvider } from '../types';
+  import { AGENT_PROVIDERS } from '../types';
+
+  // Provider tile icons live in /static. Same brand assets you see in
+  // the agent nav session-row, so the New Session picker matches the
+  // session list visually.
+  const PROVIDER_ICON: Record<AgentProvider, string> = {
+    claude: '/code-no-action.svg',
+    codex: '/codex.svg',
+    gemini: '/gemini.svg',
+    opencode: '/opencode-dark.svg',
+  };
+  import { loadAgentSessions, agentSessions, activeAgentSession, agentFooterProvider } from '../stores';
   import { tabs as tabsStore, addTab, activateTab } from '$lib/shared/stores/tabs';
   import { showToast } from '$lib/shared/primitives/toast';
   import { SESSION_PURPOSES, getPurposeColor, getPurposePrompt } from '../ai/prompt';
@@ -12,11 +26,26 @@
   let { show = $bindable(false) } = $props();
 
   let showClaudeNotInstalled = $state(false);
+  let showCodexNotInstalled = $state(false);
+  let showGeminiNotInstalled = $state(false);
+  let showOpenCodeNotInstalled = $state(false);
 
   // Form state — matches original Clauge exactly
   let projectPath = $state('');
   let title = $state('');
   let purpose = $state('');  // Empty by default — user must pick
+  // Which CLI backs this session. Defaults to the footer-selected provider
+  // (whichever the user last looked at usage for) so the typical
+  // "open another session in the same CLI" flow is one click. Coerced to
+  // an `AgentProvider` since the footer store can technically widen.
+  let provider = $state<AgentProvider>(
+    (['claude', 'codex', 'gemini', 'opencode'] as const).includes(($agentFooterProvider as any))
+      ? ($agentFooterProvider as AgentProvider)
+      : 'claude',
+  );
+  // Per-provider install state — drives the disabled grey-out in the picker.
+  // Loaded on modal open + when the picker mounts.
+  let installedByProvider = $state<Record<string, boolean>>({ claude: true });
   let skipPermissions = $state(false);
   let customPrompt = $state('');
   let gitEnabled = $state(false);
@@ -45,16 +74,37 @@
 
   async function loadDiscoveredSessions(path: string) {
     try {
-      const sessions = await agentDiscoverSessions(path);
-      // Filter out sessions already linked to a profile
-      const allSessions = get(agentSessions);
-      const linkedIds = new Set(allSessions.filter(s => s.claudeSessionId).map(s => s.claudeSessionId));
-      discoveredSessions = sessions.filter(s => !linkedIds.has(s.sessionId));
+      // Pass the selected provider so the backend queries the right
+      // session store (Claude per-project jsonl dir, Codex date-tree
+      // sessions filtered by cwd, or OpenCode SQLite by directory).
+      const sessions = await agentDiscoverSessions(path, provider);
+      // Filter out sessions already linked to a profile of the same
+      // provider — `claudeSessionId` is the historical column name for
+      // the CLI session id (rename deferred).
+      const allSessions = get(agentSessions).filter(
+        (s) => (s.provider ?? 'claude') === provider,
+      );
+      const linkedIds = new Set(
+        allSessions.filter((s) => s.claudeSessionId).map((s) => s.claudeSessionId),
+      );
+      discoveredSessions = sessions.filter((s) => !linkedIds.has(s.sessionId));
       selectedSessionId = '';
     } catch (_) {
       discoveredSessions = [];
     }
   }
+
+  // Reload discovered sessions whenever the user picks a different
+  // provider OR re-types the project path — keeps the "Custom" purpose
+  // picker honest across provider switches.
+  $effect(() => {
+    const _ = provider; // dependency
+    if (projectPath.trim()) {
+      loadDiscoveredSessions(projectPath.trim());
+    } else {
+      discoveredSessions = [];
+    }
+  });
 
   async function loadContexts() {
     try {
@@ -63,6 +113,24 @@
       availableContexts = [];
     }
   }
+
+  // Probe each provider's binary on $PATH so the picker can grey out
+  // CLIs the user hasn't installed yet. Fire-and-forget — failure leaves
+  // the existing state; only Claude is assumed-true by default.
+  async function loadProviderInstallStates() {
+    const next: Record<string, boolean> = { ...installedByProvider };
+    await Promise.all(
+      AGENT_PROVIDERS.map(async (p) => {
+        try { next[p.id] = await agentCheckCliInstalled(p.id); }
+        catch { next[p.id] = p.id === 'claude'; }
+      }),
+    );
+    installedByProvider = next;
+  }
+  // Refresh probe whenever the modal opens.
+  $effect(() => {
+    if (show) void loadProviderInstallStates();
+  });
 
   async function pickFolder() {
     try {
@@ -81,10 +149,30 @@
     if (gitEnabled && (!gitName.trim() || !gitEmail.trim())) return;
 
     try {
-      const claudeInstalled = await agentCheckClaudeInstalled();
-      if (!claudeInstalled) {
-        showClaudeNotInstalled = true;
-        return;
+      // Each provider gets its own install dialog with per-OS commands
+      // and a docs link. The agentCheckClaudeInstalled call is the
+      // legacy path; for Codex / OpenCode we use the generic
+      // agentCheckCliInstalled.
+      if (provider === 'claude') {
+        if (!(await agentCheckClaudeInstalled())) {
+          showClaudeNotInstalled = true;
+          return;
+        }
+      } else if (provider === 'codex') {
+        if (!(await agentCheckCliInstalled('codex'))) {
+          showCodexNotInstalled = true;
+          return;
+        }
+      } else if (provider === 'gemini') {
+        if (!(await agentCheckCliInstalled('gemini'))) {
+          showGeminiNotInstalled = true;
+          return;
+        }
+      } else if (provider === 'opencode') {
+        if (!(await agentCheckCliInstalled('opencode'))) {
+          showOpenCodeNotInstalled = true;
+          return;
+        }
       }
     } catch (_) {
       // If the check fails, fall through and let the spawn surface the error.
@@ -102,6 +190,7 @@
           : (getPurposePrompt(purpose) ?? undefined),
         gitName: gitEnabled && gitName.trim() ? gitName.trim() : undefined,
         gitEmail: gitEnabled && gitEmail.trim() ? gitEmail.trim() : undefined,
+        provider,
       });
 
       // Link resumed Claude session if selected
@@ -158,6 +247,30 @@
 
 <Modal bind:show title="New Session" width="440px">
   <div class="ns-form">
+    <!-- Provider picker — pick the CLI this session talks to. Unavailable
+         CLIs are greyed out so the user knows they can install + retry. -->
+    <div class="ns-field">
+      <span class="ns-label-text">Agent</span>
+      <div class="ns-provider-row">
+        {#each AGENT_PROVIDERS as p}
+          {@const installed = installedByProvider[p.id] !== false}
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <button
+            class="ns-provider"
+            class:selected={provider === p.id}
+            class:disabled={!installed}
+            disabled={!installed}
+            title={installed ? `Use ${p.label}` : `${p.label} CLI is not on PATH`}
+            onclick={() => { if (installed) provider = p.id; }}
+          >
+            <img class="ns-provider-icon" src={PROVIDER_ICON[p.id]} alt="" width="20" height="20" />
+            <span class="ns-provider-label">{p.label}</span>
+            {#if !installed}<span class="ns-provider-tag">not installed</span>{/if}
+          </button>
+        {/each}
+      </div>
+    </div>
+
     <label class="ns-field">
       <span class="ns-label">Project Folder</span>
       <div class="ns-path-row">
@@ -323,10 +436,37 @@
 </Modal>
 
 <ClaudeNotInstalledModal bind:show={showClaudeNotInstalled} />
+<CodexNotInstalledModal bind:show={showCodexNotInstalled} />
+<GeminiNotInstalledModal bind:show={showGeminiNotInstalled} />
+<OpenCodeNotInstalledModal bind:show={showOpenCodeNotInstalled} />
 
 <style>
   .ns-form { display: flex; flex-direction: column; gap: 12px; }
   .ns-field { display: flex; flex-direction: column; gap: 4px; }
+
+  /* Provider picker — segmented tiles using brand SVGs (the same icons
+   * shown in the agent session-row). Accent on selected tile uses the
+   * app accent rather than per-brand colour so it themes consistently. */
+  .ns-provider-row { display: flex; gap: 8px; }
+  .ns-provider {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    gap: 4px; padding: 10px 8px;
+    background: var(--e); border: 1px solid var(--b1); border-radius: 8px;
+    color: var(--t2); font-family: var(--ui); font-size: 11.5px;
+    cursor: pointer; transition: background 0.12s, border-color 0.12s, color 0.12s;
+  }
+  .ns-provider:hover:not(.disabled) { color: var(--t1); border-color: color-mix(in srgb, var(--t1) 22%, var(--b1)); }
+  .ns-provider.selected {
+    color: var(--t1);
+    background: color-mix(in srgb, var(--acc) 10%, transparent);
+    border-color: color-mix(in srgb, var(--acc) 45%, var(--b1));
+  }
+  .ns-provider.disabled { opacity: 0.45; cursor: not-allowed; }
+  .ns-provider-icon { display: block; }
+  .ns-provider-label { font-weight: 500; }
+  .ns-provider-tag {
+    font-size: 9.5px; color: var(--t4); letter-spacing: 0.04em; text-transform: uppercase;
+  }
   .ns-label { font-size: 12px; font-weight: 600; color: var(--t2); text-transform: uppercase; font-family: var(--ui); }
   .ns-label-text { font-size: 13px; color: var(--t1); font-family: var(--ui); }
   .ns-optional { font-size: 10px; color: var(--t3); font-weight: normal; text-transform: none; }
