@@ -20,6 +20,7 @@ use crate::shared::repos::settings;
 
 #[tauri::command]
 pub async fn cloud_get_status(
+    app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
 ) -> Result<CloudStatus, String> {
@@ -48,13 +49,42 @@ pub async fn cloud_get_status(
                     last_synced.insert(k.to_string(), s.value);
                 }
             }
-            let _ = settings::upsert(pool.inner(), SETTINGS_KEY_PLAN, &me.plan).await;
+
+            // Detect plan transitions before persisting the new value.
+            let old_plan: Option<String> = settings::get_by_key(pool.inner(), SETTINGS_KEY_PLAN)
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.value);
+            let new_plan = me.plan.clone();
+
+            let _ = settings::upsert(pool.inner(), SETTINGS_KEY_PLAN, &new_plan).await;
+
+            // Pro → free: freeze coworkers beyond the first 3.
+            if old_plan.as_deref() == Some("pro") && new_plan != "pro" {
+                let disabled = crate::shared::repos::coworkers::disable_beyond_first_n(pool.inner(), 3)
+                    .await
+                    .unwrap_or(0);
+                if disabled > 0 {
+                    let _ = app.emit(
+                        "cloud:plan_lapsed",
+                        serde_json::json!({ "disabled_coworkers": disabled }),
+                    );
+                }
+            }
+
+            // Free → pro: restore all coworkers.
+            if old_plan.as_deref() != Some("pro") && new_plan == "pro" {
+                let _ = crate::shared::repos::coworkers::enable_all(pool.inner()).await;
+                let _ = app.emit("cloud:plan_upgraded", serde_json::json!({}));
+            }
+
             Ok(CloudStatus {
                 connected: true,
                 active_provider: snap.active_provider,
                 user: Some(me.user),
                 providers: me.providers,
-                plan: me.plan,
+                plan: new_plan,
                 last_synced,
             })
         }

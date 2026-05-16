@@ -82,7 +82,9 @@
         setLastSyncedForKinds,
         cloudCredits,
         cloudPlan,
+        upgradeModalOpen,
     } from "$lib/stores/cloud";
+    import { invoke } from "@tauri-apps/api/core";
     import {
         cloudGetStatus,
         cloudCheckRemoteExists,
@@ -821,30 +823,60 @@
 
             if (isLinux()) await register("clauge").catch(() => {});
 
-            function dispatchOAuth(urls: string[]) {
+            function dispatchDeepLink(urls: string[]) {
                 for (const url of urls) {
-                    if (!url.includes("oauth-callback")) continue;
-                    const params = new URL(url).searchParams;
-                    const provider =
-                        (params.get("provider") as "github" | "google") ||
-                        "github";
-                    const code = params.get("code");
-                    if (!code || code === lastDispatchedToken) continue;
-                    lastDispatchedToken = code;
-                    window.dispatchEvent(
-                        new CustomEvent(APP_EVENT.OAUTH_CALLBACK, {
-                            detail: { provider, code },
-                        }),
-                    );
+                    try {
+                        const u = new URL(url);
+                        if (u.protocol !== "clauge:") continue;
+
+                        if (u.hostname === "oauth-callback") {
+                            const params = u.searchParams;
+                            const provider =
+                                (params.get("provider") as
+                                    | "github"
+                                    | "google") || "github";
+                            const code = params.get("code");
+                            if (!code || code === lastDispatchedToken)
+                                continue;
+                            lastDispatchedToken = code;
+                            window.dispatchEvent(
+                                new CustomEvent(APP_EVENT.OAUTH_CALLBACK, {
+                                    detail: { provider, code },
+                                }),
+                            );
+                            continue;
+                        }
+
+                        if (u.hostname === "upgrade") {
+                            upgradeModalOpen.set(true);
+                            continue;
+                        }
+
+                        if (u.hostname === "checkout-success") {
+                            invoke("cloud_get_status").catch((e) =>
+                                console.warn(
+                                    "post-checkout refresh failed",
+                                    e,
+                                ),
+                            );
+                            showToast(
+                                "Welcome to Clauge Pro — you're all set.",
+                                "success",
+                            );
+                            continue;
+                        }
+                    } catch {
+                        console.warn("deep link parse failed:", url);
+                    }
                 }
             }
 
             // Cold-start: URL is in process args, not in any event.
             const startupUrls = await getCurrent();
-            if (startupUrls?.length) dispatchOAuth(startupUrls);
+            if (startupUrls?.length) dispatchDeepLink(startupUrls);
 
             // Already-running: single-instance plugin forwards the second-instance args.
-            deepLinkUnlisten = await onOpenUrl(dispatchOAuth);
+            deepLinkUnlisten = await onOpenUrl(dispatchDeepLink);
         } catch {
             // Deep link plugin not available in dev mode — safe to ignore.
         }
