@@ -81,6 +81,7 @@
         showSyncRestorePrompt,
         setLastSyncedForKinds,
         cloudCredits,
+        cloudPlan,
     } from "$lib/stores/cloud";
     import {
         cloudGetStatus,
@@ -127,7 +128,7 @@
         teardownGlobalShortcuts,
     } from "$lib/utils/shortcuts";
     import { isLinux } from "$lib/utils/platform";
-    import { applyTheme } from "$lib/utils/theme";
+    import { applyTheme, getThemes } from "$lib/utils/theme";
     import ShortcutsOverlay from "$lib/shared/primitives/ShortcutsOverlay.svelte";
     import SaveRequestDialog from "$lib/shared/primitives/SaveRequestDialog.svelte";
     import Onboarding from "$lib/components/onboarding/Onboarding.svelte";
@@ -633,6 +634,19 @@
         );
     }
 
+
+    // When a Pro subscription lapses, fall back from any premium theme to
+    // dark-solid so the user isn't stuck on a theme they can't access.
+    $effect(() => {
+        if ($cloudPlan !== "pro") {
+            const cfg = get(appearance);
+            const current = getThemes().find((t) => t.id === cfg.theme);
+            if (current?.premium) {
+                applyTheme("dark-solid", cfg.accentColor || DEFAULT_ACCENT_COLOR);
+                appearance.set({ ...cfg, theme: "dark-solid" });
+            }
+        }
+    });
 
     // Disable macOS autocorrect/autocapitalize on all inputs
     function disableAutocorrect(el: Element) {

@@ -72,6 +72,9 @@ export interface Theme {
   // wins.
   accent?: string;
   lockAccent?: boolean;
+  // Pro-only themes. When true the theme tile shows a PRO badge and
+  // clicking it opens the upgrade modal instead of applying the theme.
+  premium?: boolean;
 }
 
 const themes: Record<string, Theme> = {
@@ -206,13 +209,6 @@ const themes: Record<string, Theme> = {
     tokens: { str: '#f6c177', num: '#ea9a97', key: '#9ccfd8', boo: '#ea9a97' },
     glass: false,
   },
-  // The block below holds themes that aren't currently surfaced in the
-  // picker. `getThemes()` iterates this Record, so commenting an entry
-  // out of it is the single switch that hides a theme. Their TERMINAL_THEMES
-  // entries below, preview swatches in `colors.ts`, and CSS rules in
-  // `app.css` remain in place as inert data — uncomment a block here and
-  // the theme is fully back, no other edits needed.
-  /*
   'carbon-grain': {
     id: 'carbon-grain',
     name: 'Carbon Grain',
@@ -238,6 +234,7 @@ const themes: Record<string, Theme> = {
     tokens: { str: '#b6c294', num: '#d4a373', key: '#a8b7d0', boo: '#d4a373' },
     glass: false,
     effectClass: 'fx-grain',
+    premium: true,
   },
   'crt-phosphor': {
     id: 'crt-phosphor',
@@ -264,6 +261,7 @@ const themes: Record<string, Theme> = {
     tokens: { str: '#b8ee88', num: '#ffe066', key: '#a8eecc', boo: '#ffe066' },
     glass: false,
     effectClass: 'fx-crt',
+    premium: true,
   },
   'aurora-drift': {
     id: 'aurora-drift',
@@ -290,8 +288,8 @@ const themes: Record<string, Theme> = {
     tokens: { str: '#9ccfd8', num: '#f6c177', key: '#8cb4e0', boo: '#eb6f92' },
     glass: false,
     effectClass: 'fx-aurora',
+    premium: true,
   },
-  */
 };
 
 export function applyTheme(themeId: string, accentColor?: string) {

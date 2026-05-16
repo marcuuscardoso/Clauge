@@ -3,7 +3,7 @@
     import ClaugeAIBalance from "$lib/components/settings/ClaugeAIBalance.svelte";
     import AIConfigEditor from "$lib/components/settings/AIConfigEditor.svelte";
     import { invoke } from "@tauri-apps/api/core";
-    import { cloudPlan } from "$lib/stores/cloud";
+    import { cloudPlan, upgradeModalOpen } from "$lib/stores/cloud";
     import AccountTabContent from "$lib/components/settings/AccountTabContent.svelte";
     import { getVersion } from "@tauri-apps/api/app";
     import { tabs as sharedTabs, activeTabId } from "$lib/shared/stores/tabs";
@@ -735,6 +735,11 @@
     }
 
     async function handleThemeChange(themeId: string) {
+        const themeDef = getTheme(themeId);
+        if (themeDef?.premium && $cloudPlan !== "pro") {
+            upgradeModalOpen.set(true);
+            return;
+        }
         applyTheme(themeId, accentColor);
 
         const config: AppearanceConfig = {
@@ -1865,6 +1870,7 @@
                                 <button
                                     class="theme-card"
                                     class:active={currentTheme === theme.id}
+                                    class:locked={theme.premium && $cloudPlan !== "pro"}
                                     onclick={() => handleThemeChange(theme.id)}
                                 >
                                     <div class="theme-preview">
@@ -1882,9 +1888,12 @@
                                         >
                                         <span class="theme-desc"
                                             >{THEME_DESCRIPTIONS[theme.id] ||
-                                                ""}</span
+                                                theme.description}</span
                                         >
                                     </div>
+                                    {#if theme.premium && $cloudPlan !== "pro"}
+                                        <span class="pro-badge">PRO</span>
+                                    {/if}
                                 </button>
                             {/each}
                         </div>
