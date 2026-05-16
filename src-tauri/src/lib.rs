@@ -349,6 +349,7 @@ pub fn run() {
             cloud::commands::cloud_open_portal,
             cloud::commands::cloud_ai_balance,
             cloud::commands::cloud_ai_usage,
+            cloud::commands::cloud_ai_chat,
             cloud::credentials_probe::cloud_probe_missing_credentials,
             modes::rest::import_export::export_collection,
             modes::rest::import_export::export_all_collections,

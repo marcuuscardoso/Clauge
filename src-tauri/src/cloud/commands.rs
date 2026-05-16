@@ -473,3 +473,34 @@ pub async fn cloud_ai_usage(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn cloud_ai_chat(
+    app: AppHandle,
+    pool: State<'_, SqlitePool>,
+    state: State<'_, AuthState>,
+    messages: Vec<serde_json::Value>,
+    session_id: String,
+) -> Result<(), String> {
+    let (token, _provider) = state
+        .active_token_and_provider()
+        .ok_or_else(|| "not signed in".to_string())?;
+    let client = crate::shared::http::build_app_http_client(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::shared::ai::clients::clauge_ai::stream_clauge_ai(
+        &client,
+        &app,
+        pool.inner(),
+        &token,
+        messages,
+        &crate::shared::ai::types::ChatContext {
+            mode: "cloud".to_string(),
+            current_request: None,
+            current_response: None,
+            env_vars: vec![],
+        },
+        &session_id,
+    )
+    .await
+}
+
