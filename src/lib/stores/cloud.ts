@@ -114,6 +114,16 @@ export function setLastSyncedForKinds(map: Record<string, string>) {
   lastSyncedByKind.set(map);
 }
 
+export type CloudCreditsSnapshot = {
+  remaining: number;
+  allowance: number;
+  resetsAt: string | null;
+} | null;
+
+export const cloudCredits = writable<CloudCreditsSnapshot>(null);
+
+export const upgradeModalOpen = writable<boolean>(false);
+
 // Restore the cached avatar on first import so the UI doesn't flash.
 if (typeof localStorage !== 'undefined') {
   const cachedAvatar = localStorage.getItem(STORAGE_KEYS.GITHUB_AVATAR);

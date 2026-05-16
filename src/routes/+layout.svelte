@@ -79,6 +79,7 @@
         markSynced,
         showSyncRestorePrompt,
         setLastSyncedForKinds,
+        cloudCredits,
     } from "$lib/stores/cloud";
     import {
         cloudGetStatus,
@@ -677,6 +678,19 @@
             WORKSPACE_EVENT.EDIT_WORKSPACE,
             handleEditWorkspace,
         );
+
+        // Global listener for Clauge AI balance events emitted after each chat response.
+        listen<{ remaining: number }>("clauge_ai:balance", (e) => {
+            cloudCredits.update((cur) => {
+                if (!cur)
+                    return {
+                        remaining: e.payload.remaining,
+                        allowance: 0,
+                        resetsAt: null,
+                    };
+                return { ...cur, remaining: e.payload.remaining };
+            });
+        });
 
         // Apply to existing and future inputs/textareas
         document

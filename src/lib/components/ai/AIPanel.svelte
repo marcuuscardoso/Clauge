@@ -28,6 +28,8 @@
   import { getSshAutoRun, setSshAutoRun, getAiPanelWidth, setAiPanelWidth } from '$lib/shared/constants/storage';
   import { aiEvent } from '$lib/shared/constants/events';
   import { COPY_FEEDBACK_MS } from '$lib/shared/constants/timings';
+  import AIConfigSelector from './AIConfigSelector.svelte';
+  import { cloudPlan, upgradeModalOpen } from '$lib/stores/cloud';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -93,6 +95,29 @@
   let cleanup: (() => void) | null = null;
   let currentChatMode = $state('');
 
+  type AiConfig = {
+    id: number;
+    label: string;
+    provider: string;
+    baseUrl: string | null;
+    defaultModel: string | null;
+    isDefault: number;
+    createdAt: string;
+    lastUsedAt: string | null;
+  };
+
+  let aiConfigs = $state<AiConfig[]>([]);
+  let selectedAI = $state<string | null>(null);
+
+  async function loadAiConfigs() {
+    try {
+      aiConfigs = await invoke<AiConfig[]>('ai_config_list');
+    } catch (e) {
+      console.warn('ai_config_list failed', e);
+      aiConfigs = [];
+    }
+  }
+
   // SSH confirmation modal state — driven by ai:tool_pending events from Rust.
   let sshModalShow = $state(false);
   let sshModalCommand = $state('');
@@ -137,6 +162,7 @@
 
   onMount(() => {
     sshAutoRun = getSshAutoRun();
+    loadAiConfigs();
   });
 
   function toggleSshAutoRun() {
@@ -434,6 +460,57 @@
   async function sendMessage() {
     const text = inputText.trim();
     if (!text || isStreaming) return;
+
+    const useClaugeAI = selectedAI === 'clauge' || (selectedAI === null && get(cloudPlan) === 'pro');
+    if (useClaugeAI) {
+      messages.push({ role: 'user', content: text, timestamp: Date.now() });
+      messages.push({ role: 'assistant', content: '', isStreaming: true, timestamp: Date.now() });
+      inputText = '';
+      isStreaming = true;
+      scrollToBottom();
+
+      const chatHistory: ChatMessage[] = messages
+        .filter(m => !m.isStreaming)
+        .map(m => ({ role: m.role, content: m.content }));
+
+      const sessionId = generateSessionId();
+      activeChatSessionId = sessionId;
+      const lastIdx = messages.length - 1;
+
+      let textOff: (() => void) | null = null;
+      let doneOff: (() => void) | null = null;
+      let errOff: (() => void) | null = null;
+
+      const cleanup2 = () => { textOff?.(); doneOff?.(); errOff?.(); };
+
+      textOff = await listen<string>(`ai:text:${sessionId}`, (e) => {
+        messages[lastIdx].content += e.payload;
+        scrollToBottom();
+      });
+      doneOff = await listen<void>(`ai:done:${sessionId}`, () => {
+        messages[lastIdx].isStreaming = false;
+        isStreaming = false;
+        cleanup2();
+      });
+      errOff = await listen<string>(`ai:error:${sessionId}`, (e) => {
+        messages[lastIdx].content = messages[lastIdx].content || `Error: ${e.payload}`;
+        messages[lastIdx].isStreaming = false;
+        isStreaming = false;
+        cleanup2();
+        showToast(String(e.payload), 'error');
+      });
+
+      try {
+        await invoke('cloud_ai_chat', { messages: chatHistory, sessionId });
+      } catch (e) {
+        messages[lastIdx].content = messages[lastIdx].content || `Error: ${e}`;
+        messages[lastIdx].isStreaming = false;
+        isStreaming = false;
+        cleanup2();
+        showToast(String(e), 'error');
+      }
+      return;
+    }
 
     const provider = $settings['ai_provider'] || 'claude';
     const apiKey = $settings[`ai_api_key_${provider}`] || '';
@@ -739,6 +816,11 @@
           {modeLabels[$mode]}
         </span>
       </div>
+      <AIConfigSelector
+        bind:value={selectedAI}
+        configs={aiConfigs}
+        onUpgradeClick={() => upgradeModalOpen.set(true)}
+      />
       <div class="ai-header-right">
         {#if $mode === 'ssh'}
           <button
