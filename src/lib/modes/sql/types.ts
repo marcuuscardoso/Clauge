@@ -34,11 +34,18 @@ export interface SqlConnection {
   sshProfileId?: string | null;
 }
 
+/** Verb classification surfaced by the backend so the result UI knows
+ *  whether to render the row grid (Select / Unknown) or the side-effect
+ *  stats card (Dml / Ddl). Was previously inferred from `columns.length`,
+ *  which misclassified empty SELECTs whose describe() failed. */
+export type QueryKind = 'select' | 'dml' | 'ddl' | 'unknown';
+
 export interface SqlQueryResult {
   columns: string[];
   rows: unknown[][];
   affectedRows: number;
   durationMs: number;
+  queryKind?: QueryKind;
 }
 
 export interface SqlResultEntry {

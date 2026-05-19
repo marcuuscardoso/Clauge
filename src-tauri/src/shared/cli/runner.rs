@@ -33,6 +33,34 @@ pub struct SpawnOpts {
     pub system_prompt: Option<String>,
     /// Whether to pass the CLI's "skip permission prompts" flag.
     pub skip_permissions: bool,
+    /// Per-session absolute path to the CLI binary, overriding the
+    /// default $PATH lookup. `None` / empty = use the bare binary name
+    /// (default behaviour). When set, the implementation is expected
+    /// to shell-quote it appropriately before splicing into the spawn
+    /// command — see [`shell_quote_path`] for the canonical helper.
+    pub binary_path_override: Option<String>,
+}
+
+/// Shell-quote a binary path for safe inclusion in a spawn command
+/// string. POSIX shells get single-quotes (with `'\''` escapes); cmd /
+/// PowerShell on Windows get double-quotes with `"` escaping. Paths
+/// without special characters pass through unquoted for readability.
+pub fn shell_quote_path(path: &str) -> String {
+    // Pass through cleanly when the path is "boring" — no whitespace,
+    // no quote chars, no shell metacharacters. Keeps logs readable on
+    // the 95% case where the user picked /usr/local/bin/<cli>.
+    let needs_quoting = path.chars().any(|c| {
+        c.is_whitespace() || matches!(c, '\'' | '"' | '\\' | '$' | '`' | '&' | '|' | ';' | '(' | ')' | '<' | '>' | '*' | '?' | '[' | ']' | '{' | '}')
+    });
+    if !needs_quoting {
+        return path.to_string();
+    }
+    if cfg!(windows) {
+        format!("\"{}\"", path.replace('"', "\\\""))
+    } else {
+        // POSIX: '...' is literal; only ' itself needs escaping via '\''
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
 }
 
 pub trait CliRunner: Send + Sync {

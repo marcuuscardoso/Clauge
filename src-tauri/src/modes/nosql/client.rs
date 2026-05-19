@@ -59,6 +59,13 @@ pub struct RedisValue {
     pub ttl: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyListResult {
+    pub keys: Vec<RedisKeyInfo>,
+    pub next_cursor: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct NoSqlConnection {
@@ -908,36 +915,41 @@ pub async fn redis_list_keys(
     connections: State<'_, NoSqlConnections>,
     connection_id: String,
     pattern: Option<String>,
-) -> Result<Vec<RedisKeyInfo>, String> {
+    cursor: Option<u64>,
+    count: Option<u32>,
+) -> Result<RedisKeyListResult, String> {
     let mut cm = get_redis!(connections, &connection_id);
     let pat = pattern.unwrap_or_else(|| "*".to_string());
+    let cur = cursor.unwrap_or(0);
+    let cnt = count.unwrap_or(100);
 
-    let keys: Vec<String> = redis::cmd("SCAN")
-        .arg(0)
+    // SCAN returns [cursor, [keys...]] — destructure as a tuple, not Vec<String>.
+    let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(cur)
         .arg("MATCH")
         .arg(&pat)
         .arg("COUNT")
-        .arg(1000)
+        .arg(cnt)
         .query_async(&mut cm)
         .await
         .map_err(|e| format!("SCAN error: {}", e))?;
 
-    let mut result = Vec::new();
-    for key in keys {
+    let mut keys = Vec::with_capacity(batch.len());
+    for key in batch {
         let key_type: String = redis::cmd("TYPE")
             .arg(&key)
             .query_async(&mut cm)
             .await
             .unwrap_or_else(|_| "unknown".to_string());
         let ttl: i64 = cm.ttl(&key).await.unwrap_or(-2);
-        result.push(RedisKeyInfo {
+        keys.push(RedisKeyInfo {
             key,
             key_type,
             ttl,
         });
     }
 
-    Ok(result)
+    Ok(RedisKeyListResult { keys, next_cursor })
 }
 
 #[tauri::command]

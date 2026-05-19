@@ -139,18 +139,27 @@ pub fn run() {
             // dirty set used by auto-sync. Spawned once, lives for app lifetime.
             app.manage(cloud::auth::AuthState::default());
             app.manage(cloud::scheduler::Scheduler::default());
+            // Single in-memory authority for Pro state. Hydrated below.
+            app.manage(cloud::pro_state::ProStateManager::default());
 
             // Load tokens from keyring (+ one-time migration from legacy
             // settings.github_token row). If a token resolves to a logged-in
             // session, enable the scheduler so subsequent mutations push.
+            // Also hydrate the ProStateManager from on-disk snapshots so the
+            // frontend's `is_pro` checks against the manager don't briefly
+            // return free on cold boot before cloud_get_status resolves.
             {
                 let pool_for_auth = app.state::<sqlx::SqlitePool>().inner().clone();
                 let auth_state = app.state::<cloud::auth::AuthState>();
+                let pro_state = app.state::<cloud::pro_state::ProStateManager>();
                 if let Err(e) = tauri::async_runtime::block_on(async {
                     cloud::auth::load_from_keyring(&auth_state, &pool_for_auth).await
                 }) {
                     log::warn!("[cloud] load_from_keyring: {}", e);
                 }
+                tauri::async_runtime::block_on(
+                    pro_state.hydrate_from_snapshot(&pool_for_auth),
+                );
                 if auth_state.is_connected() {
                     app.state::<cloud::scheduler::Scheduler>().enable();
                 }
@@ -345,6 +354,7 @@ pub fn run() {
             cloud::commands::cloud_ai_balance,
             cloud::commands::cloud_ai_usage,
             cloud::commands::cloud_get_active_token,
+            cloud::pro_state::pro_state_current,
             cloud::credentials_probe::cloud_probe_missing_credentials,
             modes::rest::import_export::export_collection,
             modes::rest::import_export::export_all_collections,
@@ -459,6 +469,7 @@ pub fn run() {
             modes::agent::commands::agent_get_claude_plan,
             modes::agent::commands::agent_check_claude_installed,
             modes::agent::commands::agent_check_cli_installed,
+            modes::agent::commands::agent_validate_binary,
             // SSH mode
             modes::ssh::profiles::ssh_list_profiles,
             modes::ssh::profiles::ssh_create_profile,

@@ -398,24 +398,20 @@ pub fn agent_discover_sessions(
 
 /// Look up the most recently-touched session id for `(provider,
 /// project_path)`. Used by the spawn path to "rehydrate" a Clauge
-/// session row whose `claudeSessionId` was never captured — the
-/// non-Claude CLIs don't print a deterministic resume marker in their
-/// PTY output, so we fall back to "newest matching session in the
-/// store" instead. Returns `None` when no matching session exists
-/// (first-time spawn, or user cleared their CLI's state).
+/// session row whose stored session id was never captured. Critical
+/// for crash/update recovery: if the app died before the PTY-output
+/// regex matched, the UUID is otherwise unrecoverable and clicking
+/// the existing session row would silently start a fresh Claude
+/// session instead of resuming. Returns `None` when no matching
+/// session exists on disk.
 #[tauri::command]
 pub fn agent_resolve_resume_id(
     project_path: String,
     provider: Option<String>,
 ) -> Result<Option<String>, String> {
     let p = provider.as_deref().unwrap_or("claude");
-    // Claude is captured from PTY output by the frontend, so we don't
-    // try to second-guess it here — return None and let the caller
-    // skip the rehydrate step.
-    if p == "claude" {
-        return Ok(None);
-    }
     let sessions = match p {
+        "claude" => discover_claude_sessions(&project_path)?,
         "codex" => discover_codex_sessions(&project_path)?,
         "gemini" => discover_gemini_sessions(&project_path)?,
         "opencode" => discover_opencode_sessions(&project_path)?,
@@ -426,57 +422,139 @@ pub fn agent_resolve_resume_id(
     Ok(sessions.into_iter().next().map(|s| s.session_id))
 }
 
+/// Canonicalize a path for comparison. Falls back to the literal path
+/// when the path doesn't exist on disk — `realpath` errors on missing
+/// paths, but we still want a reasonable comparison value (e.g. a
+/// stored project path whose folder has been moved). macOS APFS is
+/// case-insensitive at the FS level, so case-insensitive compare
+/// covers the rare Linux user who creates a case-mismatch dir.
+fn canon_for_compare(path: &str) -> String {
+    let resolved = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string());
+    // Strip the macOS /private/ prefix (added by canonicalize for /var
+    // and /tmp) so both sides compare equally regardless of which
+    // form the caller used.
+    let stripped = resolved.strip_prefix("/private").unwrap_or(&resolved);
+    stripped.to_lowercase()
+}
+
+/// Peek the FIRST `cwd` value out of a JSONL session file. Claude
+/// records its launch CWD on the early lines; later lines can record
+/// additional cwds when the session uses Bash to `cd` into subdirs —
+/// we only want the launch cwd because that's what determines which
+/// `~/.claude/projects/<dir>/` the file lives in.
+fn peek_session_cwd(path: &std::path::Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(f);
+    for (i, line) in reader.lines().enumerate() {
+        if i > 50 { break; }
+        let line = line.ok()?;
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(cwd) = val.get("cwd").and_then(|v| v.as_str()) {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn read_one_session_file(path: &std::path::Path) -> Option<DiscoveredSession> {
+    let session_id = path.file_stem().and_then(|s| s.to_str())?.to_string();
+    let modified_at = path
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+            datetime.to_rfc3339()
+        })
+        .unwrap_or_default();
+
+    // Extract first user message as preview
+    let preview = fs::read_to_string(path).ok().and_then(|content| {
+        for line in content.lines().take(20) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                if val.get("type").and_then(|t| t.as_str()) == Some("human") {
+                    if let Some(msg) = val.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
+                        let trimmed = msg.chars().take(80).collect::<String>();
+                        return Some(trimmed);
+                    }
+                }
+            }
+        }
+        None
+    });
+
+    Some(DiscoveredSession { session_id, modified_at, preview })
+}
+
 fn discover_claude_sessions(project_path: &str) -> Result<Vec<DiscoveredSession>, String> {
     let cli: &dyn CliRunner = claude_cli();
-    let projects_dir = cli
-        .session_dir_for_project(project_path)
-        .ok_or("Cannot determine home directory")?;
+    let projects_root = cli.sessions_root().ok_or("Cannot determine home directory")?;
+    let mut sessions: Vec<DiscoveredSession> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    if !projects_dir.exists() {
-        return Ok(Vec::new());
+    // L1 fast path: try the predictably-encoded directory first.
+    let primary = cli.session_dir_for_project(project_path);
+    if let Some(dir) = primary.as_ref() {
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !cli.is_session_file(&path) { continue; }
+                    if let Some(s) = read_one_session_file(&path) {
+                        if seen_ids.insert(s.session_id.clone()) {
+                            sessions.push(s);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    let mut sessions = Vec::new();
-    let entries = fs::read_dir(&projects_dir).map_err(|e| e.to_string())?;
+    // L2 fallback: enumerate every project dir under ~/.claude/projects
+    // and match by the launch-cwd recorded in each session file. Covers
+    // (a) paths whose encoder rule we don't have exact knowledge of,
+    // (b) macOS /tmp ↔ /private/tmp symlinks, (c) case-quirk dirs on
+    // case-sensitive filesystems, (d) any future Claude CLI change to
+    // its encoder. Idempotent against the fast path via `seen_ids`.
+    if projects_root.exists() {
+        let target = canon_for_compare(project_path);
+        if let Ok(top) = fs::read_dir(&projects_root) {
+            for entry in top.flatten() {
+                let dir = entry.path();
+                if !dir.is_dir() { continue; }
+                // Skip the dir we already scanned in the fast path.
+                if let Some(p) = primary.as_ref() {
+                    if &dir == p { continue; }
+                }
+                // Peek the first .jsonl file's cwd. If it matches our
+                // canonicalized target, every session file in this dir
+                // belongs to the same project.
+                let first_file = fs::read_dir(&dir).ok().and_then(|mut it| {
+                    it.find_map(|r| {
+                        let p = r.ok()?.path();
+                        if cli.is_session_file(&p) { Some(p) } else { None }
+                    })
+                });
+                let Some(first_file) = first_file else { continue };
+                let Some(cwd) = peek_session_cwd(&first_file) else { continue };
+                if canon_for_compare(&cwd) != target { continue; }
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if cli.is_session_file(&path) {
-            let session_id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let modified_at = path
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| {
-                    let datetime: chrono::DateTime<chrono::Utc> = t.into();
-                    datetime.to_rfc3339()
-                })
-                .unwrap_or_default();
-
-            // Extract first user message as preview
-            let preview = fs::read_to_string(&path).ok().and_then(|content| {
-                for line in content.lines().take(20) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                        if val.get("type").and_then(|t| t.as_str()) == Some("human") {
-                            if let Some(msg) = val.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
-                                let trimmed = msg.chars().take(80).collect::<String>();
-                                return Some(trimmed);
+                if let Ok(entries) = fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if !cli.is_session_file(&path) { continue; }
+                        if let Some(s) = read_one_session_file(&path) {
+                            if seen_ids.insert(s.session_id.clone()) {
+                                sessions.push(s);
                             }
                         }
                     }
                 }
-                None
-            });
-
-            sessions.push(DiscoveredSession {
-                session_id,
-                modified_at,
-                preview,
-            });
+            }
         }
     }
 

@@ -99,3 +99,11 @@ export const cloudWipeRemote = () =>
 
 export const cloudDeleteAccount = (confirmationSlug: string) =>
   invoke<void>('cloud_delete_account', { confirmationSlug });
+
+import type { ProState } from '$lib/stores/cloud';
+
+/** Read the current in-memory ProState from Rust. Called once at boot before
+ *  the `cloud:pro-state` event subscription is set up — gives the frontend
+ *  the latest known state immediately without waiting for a state-change
+ *  event that may not fire on the boot path. */
+export const proStateCurrent = () => invoke<ProState>('pro_state_current');

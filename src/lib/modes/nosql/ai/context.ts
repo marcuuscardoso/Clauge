@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 import { nosqlConnections, connectedNoSqlIds, activeNoSqlConnectionId, getNoSqlTabData, nosqlLiveConnectionIds } from '../stores';
-import { activeTabId } from '$lib/shared/stores/tabs';
+import { activeTabId, tabs } from '$lib/shared/stores/tabs';
 import type { ChatContext, ContextRequest, ContextEnvVar } from '$lib/types/ai';
 
 export async function gatherNosqlContext(): Promise<ChatContext> {
@@ -15,6 +15,31 @@ export async function gatherNosqlContext(): Promise<ChatContext> {
   const activeConn = conns.find(c => c.id === tabConnId);
 
   const envVars: ContextEnvVar[] = [];
+
+  // Tab classification — surfaced as `target_status` so AIPanel can
+  // short-circuit unanswerable questions with a friendly guidance message
+  // before spending an LLM call. Mirrors gatherSqlContext.
+  // Scope is the DATABASE (not the collection): AI reasons against the
+  // whole DB the active tab points at, regardless of which collection
+  // the user happens to have highlighted. Works for both MongoDB
+  // (named DBs + collections) and Redis (numbered DBs, no collections).
+  const nosqlTab = get(tabs).find((t) => t.id === tabId && t.mode === 'nosql');
+  let targetStatus: 'ready' | 'no_database' | 'disconnected' | 'no_connection' | 'no_nosql_tab';
+  if (!nosqlTab) {
+    targetStatus = 'no_nosql_tab';
+  } else if (!activeConn) {
+    targetStatus = 'no_connection';
+  } else if (!connected.has(activeConn.id)) {
+    targetStatus = 'disconnected';
+  } else if (!tabData.database) {
+    targetStatus = 'no_database';
+  } else {
+    targetStatus = 'ready';
+  }
+  envVars.push({ key: 'target_status', value: targetStatus, isSecret: false });
+  if (activeConn) {
+    envVars.push({ key: 'target_driver', value: activeConn.driver, isSecret: false });
+  }
 
   if (activeConn) {
     const isConnected = connected.has(activeConn.id);

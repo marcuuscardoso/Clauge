@@ -23,6 +23,9 @@ export const agentCreateSession = (params: {
   gitEmail?: string;
   /** 'claude' | 'codex' | 'opencode'. Omit for Claude default. */
   provider?: string;
+  /** Absolute path to the CLI binary (when the user picked one in the
+   *  Advanced section). Omit / empty string = use $PATH lookup. */
+  binaryPath?: string;
 }) => invoke<AgentSession>('agent_create_session', params);
 export const agentUpdateSession = (params: {
   id: string;
@@ -31,6 +34,9 @@ export const agentUpdateSession = (params: {
   gitName?: string;
   gitEmail?: string;
   contextPrompt?: string;
+  /** Pass an empty string to CLEAR the per-session binary override
+   *  (restore $PATH lookup). Omit entirely to leave it untouched. */
+  binaryPath?: string;
 }) => invoke<void>('agent_update_session', params);
 export const agentDeleteSession = (id: string) => invoke<void>('agent_delete_session', { id });
 export const agentUpdateSessionId = (id: string, claudeSessionId: string) => invoke<void>('agent_update_session_id', { id, claudeSessionId });
@@ -65,6 +71,9 @@ export const agentSpawnTerminal = (params: {
   gitEmail?: string;
   /** Which CLI to spawn — 'claude' | 'codex' | 'opencode'. Defaults to Claude. */
   provider?: string;
+  /** Absolute binary path override for this session. Omit / empty
+   *  string = use the standard $PATH lookup. */
+  binaryPath?: string;
   /** Workspace MCP bearer token; only consumed when provider === 'codex'.
    *  Lets codex authenticate to the workspace MCP without writing the
    *  token to ~/.codex/config.toml. Pass undefined when MCP is off. */
@@ -112,9 +121,19 @@ export const agentUninstallPlugin = (name: string, marketplace: string, provider
   invoke<void>('agent_uninstall_plugin', { provider, name, marketplace });
 
 // Check whether a given provider's CLI binary is installed on PATH.
-// Drives the provider picker's disabled state.
+// Used post-spawn to decide whether to show an install guide on
+// failure; no longer drives any UI gating in the New Session picker.
 export const agentCheckCliInstalled = (provider: string) =>
   invoke<boolean>('agent_check_cli_installed', { provider });
+
+/** Probe a custom binary path by running `<path> --version` with a
+ *  3-second timeout. Returns the stdout banner on success, or rejects
+ *  with the stderr / error reason. Used by the Advanced > Custom
+ *  Binary Path picker in NewSessionModal / EditSessionModal — devs
+ *  can still save a path that fails this probe (it's a hint, not a
+ *  gate). */
+export const agentValidateBinary = (path: string) =>
+  invoke<string>('agent_validate_binary', { path });
 
 // Usage
 export const agentGetUsageAnalytics = (days?: number, provider?: string) =>

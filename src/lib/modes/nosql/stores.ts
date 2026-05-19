@@ -55,8 +55,10 @@ export function initNoSqlTab(tabId: number) {
   setNoSqlTabData(tabId, { connectionId: connId, database: '', collection: '', filterQuery: '{}', sortQuery: '{}' });
 }
 
-// Signal from nav to open a collection in a tab
-export const openNoSqlCollection = writable<{ connectionId: string; database: string; collection: string } | null>(null);
+// Signal from nav to open a tab. Mongo passes database+collection; Redis
+// passes connectionId only (it has no databases/collections — the tab just
+// hosts the key browser + console).
+export const openNoSqlCollection = writable<{ connectionId: string; database?: string; collection?: string } | null>(null);
 
 // AI helper — insert query into active NoSQL editor
 export const insertNoSqlQueryText = writable<string>('');

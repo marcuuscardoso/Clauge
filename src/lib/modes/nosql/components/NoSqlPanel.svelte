@@ -15,20 +15,27 @@
   let loadingDbs = $state(false);
   let loadingColls = $state(false);
 
-  const conn = $derived($activeNoSqlConnection);
-  const isConnected = $derived(conn ? $connectedNoSqlIds.has(conn.id) : false);
-  const isRedis = $derived(conn?.driver === 'redis');
-  const liveId = $derived(conn ? $nosqlLiveConnectionIds[conn.id] ?? null : null);
-
-  // Active NoSQL tab
+  // Active NoSQL tab — driven by the tab strip, not by sidebar focus.
   const activeNoSqlTab = $derived($tabs.find(t => t.id === $activeTabId && t.mode === 'nosql'));
   const tabData = $derived(activeNoSqlTab ? $nosqlTabState.get(activeNoSqlTab.id) : undefined);
 
   // Per-tab selections
   const tabConnId = $derived(tabData?.connectionId ?? '');
   const tabLiveId = $derived(tabConnId ? $nosqlLiveConnectionIds[tabConnId] ?? null : null);
+  const tabConn = $derived($nosqlConnections.find(c => c.id === tabConnId) ?? null);
   const selectedDb = $derived(tabData?.database ?? '');
   const selectedColl = $derived(tabData?.collection ?? '');
+
+  // Panel rendering follows the active TAB's connection — clicking a
+  // different connection in the sidebar must not swap the viewer out from
+  // under the tab the user is actually viewing. Fall back to the global
+  // active connection only when there's no tab yet.
+  const conn = $derived(tabConn ?? $activeNoSqlConnection);
+  const isConnected = $derived(conn ? $connectedNoSqlIds.has(conn.id) : false);
+  const isRedis = $derived(conn?.driver === 'redis');
+  const liveId = $derived(
+    tabConn ? tabLiveId : (conn ? $nosqlLiveConnectionIds[conn.id] ?? null : null)
+  );
 
   // All connected MongoDB connections for the grouped dropdown
   interface ConnGroup {

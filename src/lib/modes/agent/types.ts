@@ -20,6 +20,10 @@ export interface AgentSession {
   cardId: string | null;
   /** 'claude' | 'codex' | 'gemini' | 'opencode'. */
   provider: string;
+  /** Per-session override of the CLI binary location. null/empty =
+   *  fall back to the standard $PATH lookup. Used when the user has
+   *  the agent installed somewhere `find_binary` can't reach. */
+  binaryPath: string | null;
 }
 
 /** Provider ids that map to a `CliRunner` in `runner_for`. */

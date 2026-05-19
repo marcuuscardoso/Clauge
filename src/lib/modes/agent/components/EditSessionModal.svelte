@@ -1,6 +1,6 @@
 <script lang="ts">
   import Modal from '$lib/shared/primitives/Modal.svelte';
-  import { agentUpdateSession, agentListContexts, agentGetSessionContexts, agentAttachContext, agentDetachContext } from '../commands';
+  import { agentUpdateSession, agentListContexts, agentGetSessionContexts, agentAttachContext, agentDetachContext, agentValidateBinary } from '../commands';
   import { loadAgentSessions, activeAgentSession } from '../stores';
   import { showToast } from '$lib/shared/primitives/toast';
   import type { AgentSession, AgentContext } from '../types';
@@ -15,6 +15,9 @@
   let gitEmail = $state('');
   let contextPrompt = $state('');
   let loading = $state(false);
+  let useCustomBinary = $state(false);
+  let customBinaryPath = $state('');
+  let binaryProbeResult = $state<{ kind: 'idle' | 'ok' | 'err' | 'probing'; msg: string }>({ kind: 'idle', msg: '' });
 
   // Context attachment
   let contextEnabled = $state(false);
@@ -31,12 +34,50 @@
       gitEmail = session.gitEmail || '';
       gitEnabled = !!(session.gitName || session.gitEmail);
       contextPrompt = session.contextPrompt;
+      customBinaryPath = session.binaryPath || '';
+      useCustomBinary = !!session.binaryPath;
+      binaryProbeResult = { kind: 'idle', msg: '' };
       loadSessionContexts();
     }
     if (!show) {
       showContextDropdown = false;
     }
   });
+
+  async function pickBinaryFile() {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const isWindows = navigator.userAgent.toLowerCase().includes('windows');
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        title: 'Select CLI binary',
+        filters: isWindows
+          ? [{ name: 'Executables', extensions: ['exe', 'cmd', 'bat'] }, { name: 'All files', extensions: ['*'] }]
+          : [{ name: 'All files', extensions: ['*'] }],
+      });
+      if (typeof selected === 'string' && selected) {
+        customBinaryPath = selected;
+        await probeBinary(selected);
+      }
+    } catch (_) {}
+  }
+
+  async function probeBinary(path: string) {
+    const trimmed = path.trim();
+    if (!trimmed) {
+      binaryProbeResult = { kind: 'idle', msg: '' };
+      return;
+    }
+    binaryProbeResult = { kind: 'probing', msg: 'Checking…' };
+    try {
+      const banner = await agentValidateBinary(trimmed);
+      binaryProbeResult = { kind: 'ok', msg: banner.split('\n')[0].slice(0, 80) };
+    } catch (e: any) {
+      const msg = (typeof e === 'string' ? e : e?.message ?? String(e)).split('\n')[0].slice(0, 120);
+      binaryProbeResult = { kind: 'err', msg };
+    }
+  }
 
   async function loadSessionContexts() {
     if (!session) return;
@@ -66,6 +107,10 @@
         gitName: gitEnabled && gitName.trim() ? gitName.trim() : undefined,
         gitEmail: gitEnabled && gitEmail.trim() ? gitEmail.trim() : undefined,
         contextPrompt: contextPrompt,
+        // Empty string CLEARS the override (back to $PATH); a non-empty
+        // string sets it; omitting the field leaves the existing value
+        // untouched. Toggle-off needs the empty-string form.
+        binaryPath: useCustomBinary ? customBinaryPath.trim() : '',
       });
 
       // Sync context attachments — detach removed, attach added
@@ -83,7 +128,15 @@
       await loadAgentSessions();
       // Update in-memory active session and relaunch with new settings
       if (session) {
-        const updated = { ...session, title: title.trim(), contextPrompt, skipPermissions: skipPermissions ? 1 : 0, gitName: gitEnabled && gitName.trim() ? gitName.trim() : null, gitEmail: gitEnabled && gitEmail.trim() ? gitEmail.trim() : null };
+        const updated = {
+          ...session,
+          title: title.trim(),
+          contextPrompt,
+          skipPermissions: skipPermissions ? 1 : 0,
+          gitName: gitEnabled && gitName.trim() ? gitName.trim() : null,
+          gitEmail: gitEnabled && gitEmail.trim() ? gitEmail.trim() : null,
+          binaryPath: useCustomBinary && customBinaryPath.trim() ? customBinaryPath.trim() : null,
+        };
         activeAgentSession.set(updated);
         // Relaunch terminal with --resume + updated prompt (shows loader, seamless)
         window.dispatchEvent(new CustomEvent(AGENT_EVENT.RELAUNCH_SESSION, { detail: { session: updated } }));
@@ -172,11 +225,47 @@
         </div>
       {/if}
 
+      <!-- Custom binary path — per-session override of the CLI location.
+           Mirrors the toggle in NewSessionModal so devs can change it
+           after the fact (e.g. picked the wrong binary at creation
+           time, or installed a newer version somewhere else). -->
+      <div class="ns-toggle-row">
+        <div class="ns-toggle-info">
+          <span class="ns-toggle-text">Custom Binary Path</span>
+          <span class="ns-toggle-hint">Use a specific {session.provider} binary for this session instead of $PATH</span>
+        </div>
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <button class="ns-toggle" class:on={useCustomBinary} onclick={() => { useCustomBinary = !useCustomBinary; if (!useCustomBinary) { customBinaryPath = ''; binaryProbeResult = { kind: 'idle', msg: '' }; } }}>
+          <span class="ns-toggle-knob"></span>
+        </button>
+      </div>
+      {#if useCustomBinary}
+        <div class="ns-adv-body">
+          <div class="ns-path-row">
+            <input
+              class="ns-input ns-path-input"
+              type="text"
+              bind:value={customBinaryPath}
+              placeholder="/usr/local/bin/{session.provider}"
+              onblur={() => probeBinary(customBinaryPath)}
+            />
+            <button class="ns-btn-browse" onclick={pickBinaryFile}>Browse</button>
+          </div>
+          {#if binaryProbeResult.kind === 'probing'}
+            <div class="ns-probe-hint">{binaryProbeResult.msg}</div>
+          {:else if binaryProbeResult.kind === 'ok'}
+            <div class="ns-probe-hint ns-probe-ok">✓ {binaryProbeResult.msg}</div>
+          {:else if binaryProbeResult.kind === 'err'}
+            <div class="ns-probe-hint ns-probe-err">⚠ {binaryProbeResult.msg} — save anyway?</div>
+          {/if}
+        </div>
+      {/if}
+
       <!-- Attach Contexts toggle -->
       <div class="ns-toggle-row">
         <div class="ns-toggle-info">
           <span class="ns-toggle-text">Attach Contexts</span>
-          <span class="ns-toggle-hint">Inject context snippets into CLAUDE.md before each spawn</span>
+          <span class="ns-toggle-hint">Inject context snippets into the project's agent file before each spawn</span>
         </div>
         <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
         <button class="ns-toggle" class:on={contextEnabled} onclick={() => { contextEnabled = !contextEnabled; if (!contextEnabled) attachedContextIds = new Set(); }}>
@@ -250,6 +339,22 @@
   }
   .ns-textarea:focus { border-color: var(--acc); }
   .ns-textarea::placeholder { color: var(--t3); }
+  .ns-path-row { display: flex; gap: 6px; }
+  .ns-path-row .ns-input { flex: 1; min-width: 0; }
+  .ns-btn-browse {
+    height: 34px; padding: 0 12px; background: var(--e);
+    border: 1px solid var(--b1); border-radius: 6px; color: var(--t1);
+    font-family: var(--ui); font-size: 12px; cursor: pointer;
+    transition: border-color 0.15s, background 0.15s; white-space: nowrap;
+  }
+  .ns-btn-browse:hover { border-color: var(--acc); background: var(--b1); }
+  .ns-probe-hint {
+    margin-top: 6px;
+    font-size: 11px; font-family: var(--mono);
+    color: var(--t3); line-height: 1.4; word-break: break-word;
+  }
+  .ns-probe-ok { color: var(--ok, #2ee08a); }
+  .ns-probe-err { color: var(--warn, #f4c150); }
   .ns-info-row {
     display: flex; align-items: center; justify-content: space-between;
     padding: 6px 0;

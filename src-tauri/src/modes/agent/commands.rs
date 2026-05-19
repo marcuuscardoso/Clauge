@@ -21,6 +21,7 @@ pub async fn agent_create_session(
     skip_permissions: Option<bool>, custom_prompt: Option<String>,
     git_name: Option<String>, git_email: Option<String>,
     provider: Option<String>,
+    binary_path: Option<String>,
 ) -> Result<AgentSession, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -34,6 +35,10 @@ pub async fn agent_create_session(
     let provider = provider
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| "claude".to_string());
+    let bin = binary_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     sessions_repo::insert_session(
         pool.inner(),
         &id,
@@ -48,6 +53,7 @@ pub async fn agent_create_session(
         &now,
         &now,
         &provider,
+        bin,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -73,6 +79,11 @@ pub async fn agent_update_session(
     pool: State<'_, SqlitePool>, id: String,
     title: Option<String>, skip_permissions: Option<bool>,
     git_name: Option<String>, git_email: Option<String>, context_prompt: Option<String>,
+    // Pass `Some("")` (empty string) to CLEAR the per-session override
+    // and restore the default $PATH lookup. `None` means "don't touch
+    // the existing value" — keeps the partial-update semantics the
+    // other Option params already use.
+    binary_path: Option<String>,
 ) -> Result<(), String> {
     if let Some(t) = title {
         sessions_repo::update_session_title(pool.inner(), &id, &t).await.map_err(|e| e.to_string())?;
@@ -89,6 +100,11 @@ pub async fn agent_update_session(
     }
     if let Some(ref prompt) = context_prompt {
         sessions_repo::update_session_context_prompt(pool.inner(), &id, prompt).await.map_err(|e| e.to_string())?;
+    }
+    if let Some(bp) = binary_path {
+        let trimmed = bp.trim();
+        let arg = if trimmed.is_empty() { None } else { Some(trimmed) };
+        sessions_repo::update_session_binary_path(pool.inner(), &id, arg).await.map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -343,9 +359,16 @@ pub fn agent_inject_purpose(
     provider: String,
     purpose_prompt: String,
 ) -> Result<(), String> {
-    if provider != "gemini" {
-        // Other providers have real system-prompt flags; their persona
-        // travels via the spawn command, not a context file.
+    // Providers without a real system-prompt CLI flag get their persona
+    // written into the project's agent file pre-spawn. Claude / Codex
+    // both have first-class flags (`--append-system-prompt` and `-c
+    // instructions=`), so their persona travels via the spawn command
+    // instead — no file write needed. Currently that leaves Gemini (no
+    // prompt flag at all) and OpenCode (the prompt arg is silently
+    // dropped at spawn). They both write to a marker block in their
+    // respective context file (GEMINI.md / AGENTS.md), which doesn't
+    // collide with the contexts feature's own marker block.
+    if provider != "gemini" && provider != "opencode" {
         return Ok(());
     }
     let filename = context_file_for(&provider);
@@ -359,6 +382,67 @@ pub fn agent_update_tray_title(app_handle: tauri::AppHandle, title: String) -> R
         tray.set_title(Some(&title)).map_err(|e| format!("Tray error: {}", e))?;
     }
     Ok(())
+}
+
+/// Quick "does this binary exist and run?" probe used by the
+/// per-session custom-binary picker in NewSessionModal / EditSessionModal.
+/// Calls `<path> --version` with a 3-second timeout. Returns the trimmed
+/// stdout on success (e.g. "claude-code 1.4.2"), or an `Err` describing
+/// what went wrong. Non-blocking: the modal uses the result as a hint
+/// only — devs can still save a path that doesn't pass the probe (a CLI
+/// might not implement --version, or might gate it behind login).
+#[tauri::command]
+pub fn agent_validate_binary(path: String) -> Result<String, String> {
+    use std::time::Duration;
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is empty".to_string());
+    }
+    if !std::path::Path::new(trimmed).is_file() {
+        return Err(format!("File does not exist: {}", trimmed));
+    }
+    let child = std::process::Command::new(trimmed)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Could not execute: {}", e))?;
+
+    // Wait with a 3s timeout. We don't pull in tokio for this single call
+    // — a thread-and-sleep loop is fine for one short probe.
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(3);
+    let mut child = child;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                use std::io::Read;
+                if let Some(mut s) = child.stdout.take() {
+                    let _ = s.read_to_string(&mut stdout);
+                }
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = s.read_to_string(&mut stderr);
+                }
+                if status.success() {
+                    let trimmed_out = stdout.trim();
+                    return Ok(if trimmed_out.is_empty() { stderr.trim().to_string() } else { trimmed_out.to_string() });
+                }
+                let msg = if !stderr.trim().is_empty() { stderr.trim().to_string() } else { format!("Exited with status {}", status) };
+                return Err(msg);
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err("Binary did not respond to --version within 3s".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("Wait failed: {}", e)),
+        }
+    }
 }
 
 #[tauri::command]

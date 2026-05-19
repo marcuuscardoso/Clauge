@@ -370,9 +370,9 @@
 
   async function requestChanges(card: WorkspaceBoardCard) {
     // Request changes = clear review_pending + move back to the
-    // "In Review" active-work column. Same matcher Rust uses for
+    // "In Progress" active-work column. Same matcher Rust uses for
     // is_active_class.
-    const active = columns.find(c => c.name.trim().toLowerCase() === 'in review')
+    const active = columns.find(c => c.name.trim().toLowerCase() === 'in progress')
       ?? columns.find(c => c.name.trim().toLowerCase() === 'todo')
       ?? columns[0];
     if (!active) return;

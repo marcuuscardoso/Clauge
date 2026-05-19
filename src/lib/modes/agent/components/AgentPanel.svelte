@@ -1144,19 +1144,23 @@
       const rawPrompt = getPurposePrompt(session.purpose) || session.contextPrompt || '';
       const purposePrompt = rawPrompt.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
 
-      // Gemini-only: write the purpose prompt into GEMINI.md before
-      // spawn. Other providers have real system-prompt flags and
-      // ignore this call. Without this, Gemini's previous workaround
-      // (`--prompt-interactive`) ran the persona as the user's first
-      // message at every spawn / resume — the alpha "Gemini just starts
-      // working without waiting for me" bug. With this, Gemini reads
-      // the persona from its context file at startup and the TUI sits
-      // idle waiting for the user's first turn.
-      if (session.provider === 'gemini') {
+      // Gemini and OpenCode: write the purpose prompt into the
+      // project's agent file (GEMINI.md / AGENTS.md) before spawn.
+      // Claude and Codex have real system-prompt CLI flags
+      // (`--append-system-prompt` / `-c instructions=`) so their
+      // persona travels via the spawn command instead — no file
+      // write needed. Without this, Gemini used to run the persona
+      // as the user's first message every spawn (the "starts working
+      // without waiting" bug), and OpenCode silently ignored Custom-
+      // purpose prompts entirely. The Rust side is no-op for any
+      // other provider, so the call is safe to make unconditionally
+      // and we keep the branch explicit only to skip the IPC round
+      // trip on Claude/Codex.
+      if (session.provider === 'gemini' || session.provider === 'opencode') {
         try {
-          await agentInjectPurpose(spawnPath, 'gemini', purposePrompt);
+          await agentInjectPurpose(spawnPath, session.provider, purposePrompt);
         } catch (e) {
-          console.warn('[TERM] Gemini purpose-prompt injection failed:', e);
+          console.warn(`[TERM] ${session.provider} purpose-prompt injection failed:`, e);
         }
       }
 
@@ -1172,14 +1176,19 @@
       // skip flag we honour + clear here so a reset doesn't loop back
       // to the just-killed session.
       let resumeId = session.claudeSessionId || undefined;
-      if (!resumeId && session.provider && session.provider !== 'claude') {
+      // Rehydrate the resume id from disk when the DB row lost it
+      // (e.g. app crash/update before PTY capture, or the row was
+      // imported from another machine). Applies to every provider,
+      // including Claude — without this, a missing claudeSessionId
+      // means clicking the existing session silently starts fresh.
+      if (!resumeId) {
         const skipKey = `agent_skip_rehydrate.${session.id}`;
         const skip = await getSetting(skipKey).catch(() => null);
         if (skip === '1') {
           await setSetting(skipKey, '').catch(() => {});
         } else {
           try {
-            const found = await agentResolveResumeId(spawnPath, session.provider);
+            const found = await agentResolveResumeId(spawnPath, session.provider || 'claude');
             if (found) {
               resumeId = found;
               await agentUpdateSessionId(session.id, found);
@@ -1203,6 +1212,11 @@
         // sessions launch their own CLI instead of falling back to
         // Claude. Legacy rows pre-migration-13 have provider='claude'.
         provider: session.provider || 'claude',
+        // Per-session custom binary path (Advanced > Custom Binary
+        // Path in New/Edit Session). When set, the runner uses this
+        // shell-quoted path in place of the bare binary name. NULL /
+        // empty = standard $PATH lookup.
+        binaryPath: session.binaryPath || undefined,
         // Codex authenticates to the workspace MCP via an env-var
         // bearer (--bearer-token-env-var CLAUGE_WORKSPACE_TOKEN); pass
         // the persisted token (read from app settings) so it lands in

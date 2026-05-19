@@ -34,6 +34,11 @@ pub fn agent_spawn_terminal(
     git_name: Option<String>,
     git_email: Option<String>,
     provider: Option<String>,
+    // Per-session override of the CLI binary path. Forwarded into
+    // `SpawnOpts::binary_path_override` so the provider's
+    // `build_spawn_command` substitutes it (shell-quoted) in place of
+    // the bare binary name. `None`/empty = default $PATH lookup.
+    binary_path: Option<String>,
     // Workspace MCP bearer token. Only used when `provider == "codex"`
     // — injected into the spawned shell's env as
     // `CLAUGE_WORKSPACE_TOKEN`, which codex reads via the
@@ -57,6 +62,11 @@ pub fn agent_spawn_terminal(
         resume_session_id: session_id,
         system_prompt: context_prompt,
         skip_permissions: skip_permissions.unwrap_or(false),
+        binary_path_override: binary_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     });
 
     let (shell_path, shell_kind) = default_user_shell();

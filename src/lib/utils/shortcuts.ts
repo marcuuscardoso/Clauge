@@ -115,10 +115,28 @@ function handleKeydown(e: KeyboardEvent) {
     return;
   }
 
+  // Cmd+Shift+1..8: switch mode. Order matches the sidebar:
+  //   1 Agent · 2 Workspace · 3 REST · 4 SQL · 5 NoSQL · 6 SSH · 7 Explorer · 8 History
+  //
+  // Uses `e.code` (physical key) because Cmd+Shift+1 yields `e.key === '!'`
+  // on US layouts. Must be checked BEFORE the plain Cmd+1..9 tab-switch
+  // below or that branch would never see the shifted form — actually they
+  // can't collide since the tab branch checks `e.key`, but ordering keeps
+  // the intent obvious.
+  if (meta && e.shiftKey && !isInput && e.code.startsWith('Digit')) {
+    const idx = parseInt(e.code.slice(5), 10) - 1;
+    const modes = ['agent', 'workspace', 'rest', 'sql', 'nosql', 'ssh', 'explorer', 'history'] as const;
+    if (idx >= 0 && idx < modes.length) {
+      e.preventDefault();
+      mode.set(modes[idx]);
+      return;
+    }
+  }
+
   // Cmd+1-9: switch to Nth tab in the topbar (global, across all modes).
   // Activation flips mode + runs side effects via the shared helper, so
   // the user lands on the correct panel regardless of current mode.
-  if (meta && !isInput && e.key >= '1' && e.key <= '9') {
+  if (meta && !e.shiftKey && !isInput && e.key >= '1' && e.key <= '9') {
     e.preventDefault();
     const allTabs = get(tabs);
     const idx = parseInt(e.key) - 1;
@@ -134,6 +152,17 @@ function handleKeydown(e: KeyboardEvent) {
   if (meta && e.key === 'b' && !isInput) {
     navOpen.update(v => !v);
     e.preventDefault();
+  }
+
+  // Cmd/Ctrl+T: equivalent to clicking the "+" tab button. Topbar owns
+  // the per-mode dispatch (SQL script prompt, REST/NoSQL blank tab,
+  // SSH/Agent/Workspace/Explorer picker) — we just trigger that path so
+  // every mode behaves identically to the click. History mode hides the
+  // "+" button entirely, so the shortcut is a no-op there too.
+  if (meta && (e.key === 't' || e.key === 'T') && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    if (get(mode) === 'history') return;
+    window.dispatchEvent(new CustomEvent(APP_EVENT.NEW_TAB));
   }
 
   // Cmd+L: toggle AI panel — but only in modes that actually wire up
@@ -154,7 +183,7 @@ function handleKeydown(e: KeyboardEvent) {
       e.preventDefault();
       return;
     }
-    if (currentMode === 'workspace') {
+    if (currentMode === 'workspace' || currentMode === 'history') {
       e.preventDefault();
       return;
     }

@@ -18,7 +18,6 @@
     import {
         loadAgentSessions,
         loadAgentContexts,
-        loadProviderInstallStates,
     } from "$lib/modes/agent/stores";
     import { getPurposeColor } from "$lib/modes/agent/ai/prompt";
     import NewSessionModal from "$lib/modes/agent/components/NewSessionModal.svelte";
@@ -77,22 +76,27 @@
     } from "$lib/stores/settings";
     import {
         setConnected,
+        setDisconnected,
         hasSyncedOnce,
         markSynced,
         showSyncRestorePrompt,
         setLastSyncedForKinds,
-        cloudCredits,
+        proState,
         cloudPlan,
+        cloudSub,
         upgradeModalOpen,
         welcomeProModalOpen,
+        welcomeProPlanHint,
+        postCheckoutVerifying,
     } from "$lib/stores/cloud";
-    import { invoke } from "@tauri-apps/api/core";
     import {
         cloudGetStatus,
+        cloudLogout,
         cloudCheckRemoteExists,
         cloudSyncPushNow,
         cloudGetConflicts,
         cloudPullIfRemoteNewer,
+        proStateCurrent,
     } from "$lib/commands/cloud";
     import { listen } from "@tauri-apps/api/event";
     import { cloudConflicts } from "$lib/stores/cloud";
@@ -125,6 +129,7 @@
         addTab,
         activeTabId,
         activateTab,
+        openSettingsTab,
     } from "$lib/shared/stores/tabs";
     import type { AgentSession } from "$lib/modes/agent/types";
     import {
@@ -698,18 +703,16 @@
             handleEditWorkspace,
         );
 
-        // Global listener for Clauge AI balance events emitted after each chat response.
-        listen<{ remaining: number }>("clauge_ai:balance", (e) => {
-            cloudCredits.update((cur) => {
-                if (!cur)
-                    return {
-                        remaining: e.payload.remaining,
-                        allowance: 0,
-                        resetsAt: null,
-                    };
-                return { ...cur, remaining: e.payload.remaining };
-            });
-        });
+        // ProState authority subscription. Rust's ProStateManager emits this
+        // event on every Pro/credit/subscription change (sign-in, refresh,
+        // sign-out, post-checkout poll, SSE balance tick, etc.). The
+        // back-compat `cloudPlan`/`cloudCredits`/`cloudSub` derived stores
+        // follow automatically. Replaces the old `clauge_ai:balance` listener
+        // and the inline applyEntitlements logic.
+        listen<{ state: import("$lib/stores/cloud").ProState; trigger: string }>(
+            "cloud:pro-state",
+            (e) => proState.set(e.payload.state),
+        );
 
         // Apply to existing and future inputs/textareas
         document
@@ -765,13 +768,10 @@
             loadWorkspaces(),
             loadMcpStatus(),
             refreshInboxUnread(),
-            // Pre-warm agent CLI install probes so the "+ New Session"
-            // modal can render its provider tiles instantly. Per-provider
-            // probes shell out (`which <cli>`); doing them on boot
-            // (parallel with everything else) costs nothing perceivable
-            // here but saves the user a multi-hundred-ms delay on the
-            // first click, especially on Windows / with network drives.
-            loadProviderInstallStates(),
+            // (Pre-warm of agent CLI install probes was removed: the
+            // New Session modal no longer disables provider tiles based
+            // on the result. The spawn-time install check still surfaces
+            // the per-provider install guide on first run.)
         ]);
 
         applyAppearanceOnStartup();
@@ -825,7 +825,107 @@
 
             if (isLinux()) await register("clauge").catch(() => {});
 
-            function dispatchDeepLink(urls: string[]) {
+            // Fire cloud_get_status; the Rust ProStateManager applies the
+            // entitlements + emits cloud:pro-state which our subscription
+            // picks up and writes into the proState store. We only handle
+            // the identity-side stores (user / providers / activeProvider /
+            // last-synced) here — the manager owns plan/credits/subscription.
+            async function applyCloudStatus(): Promise<{
+                connected: boolean;
+                plan: string;
+                hasSub: boolean;
+                interval: string | null;
+                isLifetime: boolean;
+            }> {
+                try {
+                    const status = await cloudGetStatus();
+                    if (!status.connected || !status.user) {
+                        return {
+                            connected: false,
+                            plan: "free",
+                            hasSub: false,
+                            interval: null,
+                            isLifetime: false,
+                        };
+                    }
+                    setConnected(
+                        status.user,
+                        status.providers,
+                        status.activeProvider,
+                    );
+                    setLastSyncedForKinds(status.lastSynced);
+                    const sub = status.entitlements?.subscription ?? null;
+                    return {
+                        connected: true,
+                        plan: status.plan,
+                        hasSub: !!sub,
+                        interval: sub?.interval ?? null,
+                        isLifetime: sub?.is_lifetime === true,
+                    };
+                } catch (e) {
+                    console.warn("[Cloud] status fetch failed:", e);
+                    return {
+                        connected: false,
+                        plan: "free",
+                        hasSub: false,
+                        interval: null,
+                        isLifetime: false,
+                    };
+                }
+            }
+
+            // True iff the live subscription matches the tier the user just
+            // purchased. Drives the post-checkout poll's exit condition.
+            function statusMatchesHint(
+                hint: "monthly" | "yearly" | "lifetime" | null,
+                state: {
+                    plan: string;
+                    hasSub: boolean;
+                    interval: string | null;
+                    isLifetime: boolean;
+                },
+            ): boolean {
+                if (state.plan !== "pro") return false;
+                if (!state.hasSub) return false;
+                if (hint === "lifetime") return state.isLifetime;
+                if (hint === "monthly")
+                    return !state.isLifetime && state.interval === "monthly";
+                if (hint === "yearly")
+                    return !state.isLifetime && state.interval === "yearly";
+                // No hint — any Pro subscription is acceptable.
+                return true;
+            }
+
+            // Poll /api/auth/me until the webhook has updated D1 (or we time
+            // out). Backoff is tight up front since webhooks usually land in
+            // ~1-3s, then widens. Total budget ~20s. While polling,
+            // `postCheckoutVerifying` is true so the WelcomeProModal shows a
+            // loading state and disables close.
+            async function pollPostCheckoutStatus(
+                hint: "monthly" | "yearly" | "lifetime" | null,
+            ): Promise<void> {
+                const delays = [500, 1000, 1500, 2000, 2500, 3500, 4500, 5000];
+                // Immediate first attempt (no wait) — webhook may already be done.
+                let state = await applyCloudStatus();
+                if (statusMatchesHint(hint, state)) {
+                    postCheckoutVerifying.set(false);
+                    return;
+                }
+                for (const ms of delays) {
+                    await new Promise((r) => setTimeout(r, ms));
+                    state = await applyCloudStatus();
+                    if (statusMatchesHint(hint, state)) {
+                        postCheckoutVerifying.set(false);
+                        return;
+                    }
+                }
+                // Timed out. Drop the verifying flag so the celebration UI
+                // shows anyway — the user did pay, AccountTab refresh on
+                // next mount will eventually catch up.
+                postCheckoutVerifying.set(false);
+            }
+
+            async function dispatchDeepLink(urls: string[]) {
                 for (const url of urls) {
                     try {
                         const u = new URL(url);
@@ -850,19 +950,57 @@
                         }
 
                         if (u.hostname === "upgrade") {
-                            upgradeModalOpen.set(true);
+                            // Don't show the UpgradeModal to a Pro user —
+                            // every in-app entry point already gates on
+                            // !isPro, but the deep-link is the one path
+                            // that bypassed that gate. Pro users get sent
+                            // to Settings → Account so they can manage
+                            // their existing subscription instead.
+                            if (get(cloudPlan) === "pro") {
+                                openSettingsTab("account");
+                            } else {
+                                upgradeModalOpen.set(true);
+                            }
                             continue;
                         }
 
                         if (u.hostname === "checkout-success") {
-                            invoke("cloud_get_status").catch((e) =>
-                                console.warn(
-                                    "post-checkout refresh failed",
-                                    e,
-                                ),
-                            );
+                            // Stash the URL-hint tier first so the modal's
+                            // loading + celebration content can use it
+                            // independently of cloudSub being fresh.
+                            const planParam = u.searchParams.get("plan");
+                            const hint:
+                                | "monthly"
+                                | "yearly"
+                                | "lifetime"
+                                | null =
+                                planParam === "monthly" ||
+                                planParam === "yearly" ||
+                                planParam === "lifetime"
+                                    ? planParam
+                                    : null;
+                            if (hint) welcomeProPlanHint.set(hint);
+
+                            // Open the modal immediately in "Verifying" state
+                            // so the user never sees stale free UI / a
+                            // GetPro CTA flash between Polar redirect and
+                            // webhook delivery.
                             upgradeModalOpen.set(false);
+                            postCheckoutVerifying.set(true);
                             welcomeProModalOpen.set(true);
+
+                            // Poll until cloudSub reflects the purchased tier
+                            // (webhook landed), then drop the verifying flag
+                            // so the modal swaps to celebration content.
+                            // Background-runs; user can't dismiss while
+                            // verifying (WelcomeProModal disables close).
+                            pollPostCheckoutStatus(hint).catch((e) => {
+                                console.warn(
+                                    "[post-checkout] poll failed",
+                                    e,
+                                );
+                                postCheckoutVerifying.set(false);
+                            });
                             continue;
                         }
                     } catch {
@@ -883,8 +1021,24 @@
 
         // No default tab — user creates tabs by clicking "+" or opening a request
 
+        // Optimistic boot: hydrate proState from the Rust ProStateManager's
+        // in-memory snapshot. The manager loaded its state from the SQLite
+        // cloud:* keys during app::setup() before any cloud_get_status fired,
+        // so this is synchronous from the user's perspective — Pro-gated UI
+        // (sidebar, AI panel, AccountTab) renders the last-known state
+        // instantly. The subsequent cloud_get_status reconciles with the
+        // server and the manager emits cloud:pro-state to update us.
+        try {
+            const initial = await proStateCurrent();
+            proState.set(initial);
+        } catch (e) {
+            console.warn("[Cloud] proState hydrate failed:", e);
+        }
+
         // Cloud sync: pull status, decide first-sign-in flow. Auto-push is driven
         // by the Rust scheduler (debounced 5s after any mutation), no JS interval.
+        // The ProStateManager handles entitlement application + transition hooks
+        // server-side; we only handle the identity-side stores here.
         try {
             const status = await cloudGetStatus();
             if (status.connected && status.user) {
@@ -892,7 +1046,6 @@
                     status.user,
                     status.providers,
                     status.activeProvider,
-                    status.plan,
                 );
                 setLastSyncedForKinds(status.lastSynced);
 
@@ -919,8 +1072,25 @@
                         console.warn("[Cloud] initial push failed:", e),
                     );
                 }
+            } else {
+                // Server says we're not authenticated. The snapshots we
+                // hydrated optimistically above are stale (session expired
+                // with no refresh path, account deleted elsewhere, keyring
+                // wiped, etc.). Clear in-memory state immediately so the
+                // sidebar / AI panel don't keep showing Pro UI for a user
+                // who isn't actually signed in, and tell Rust to wipe the
+                // on-disk snapshots + keyring so the next boot doesn't
+                // repeat the lie.
+                setDisconnected();
+                cloudLogout().catch((e) =>
+                    console.warn("[Cloud] snapshot wipe failed:", e),
+                );
             }
         } catch (e) {
+            // Network blip or transient error — leave the optimistic
+            // hydration in place. We don't know if the user is truly
+            // unauthenticated, and downgrading them on every failed
+            // fetch would defeat the cold-start optimization.
             console.warn("[Cloud] status check failed:", e);
         }
 

@@ -3,7 +3,7 @@
   import { tabs, activeTabId, addTab, closeTab, activateTab, getDraft, markClean, clearDraft } from '$lib/shared/stores/tabs';
   import { activeRequestId, loadRequest, clearActiveRequest, commitRequest } from '$lib/modes/rest/stores';
   import { sqlIsConnected, activeConnection, disconnectFromDb, initSqlTab, clearSqlTabData, setSqlTabData, sqlScripts, saveSqlScript, updateSqlScript, deleteSqlScript, getSqlTabData, activeConnectionId, selectedDatabase, connectToDatabase, sqlPendingChanges, connectToDb, connectedIds, connections, loadConnections } from '$lib/modes/sql/stores';
-  import { clearNoSqlTabData, initNoSqlTab, openNoSqlCollection, setNoSqlTabData, activeNoSqlConnectionId, connectedNoSqlIds } from '$lib/modes/nosql/stores';
+  import { clearNoSqlTabData, initNoSqlTab, openNoSqlCollection, setNoSqlTabData, activeNoSqlConnectionId, connectedNoSqlIds, nosqlConnections } from '$lib/modes/nosql/stores';
   import { showToast } from '$lib/shared/primitives/toast';
   import ConfirmDialog from '$lib/shared/primitives/ConfirmDialog.svelte';
   import { friendlyError } from '$lib/utils/errors';
@@ -453,27 +453,36 @@
     }
   }
 
-  // NoSQL: open collection in tab (triggered from nav)
+  // NoSQL: open collection (Mongo) or connection viewer (Redis) in a tab.
+  // Mongo requests include database+collection; Redis sends connectionId only.
   $effect(() => {
     const req = $openNoSqlCollection;
     if (!req) return;
     openNoSqlCollection.set(null);
 
-    // Check if already open
     const allTabs = get(tabs);
-    const key = `${req.connectionId}:${req.database}:${req.collection}`;
+    const isRedisReq = !req.database && !req.collection;
+    const key = isRedisReq
+      ? `${req.connectionId}:__redis__`
+      : `${req.connectionId}:${req.database}:${req.collection}`;
     const existing = allTabs.find(t => t.mode === 'nosql' && t.key === key);
     if (existing) {
       activateTab(existing.id);
       return;
     }
 
-    const label = `${req.collection}`;
+    let label: string;
+    if (isRedisReq) {
+      const conn = get(nosqlConnections).find(c => c.id === req.connectionId);
+      label = conn?.name ?? 'Redis';
+    } else {
+      label = `${req.collection}`;
+    }
     const tab = addTab(label, 'nosql', key, 'var(--nosql)');
     setNoSqlTabData(tab.id, {
       connectionId: req.connectionId,
-      database: req.database,
-      collection: req.collection,
+      database: req.database ?? '',
+      collection: req.collection ?? '',
       filterQuery: '{}',
       sortQuery: '{}',
     });
@@ -498,11 +507,19 @@
     }
   }
 
+  function handleNewTabShortcut() {
+    // No anchor element: pickers/popovers fall back to the default x/y
+    // already baked into handleAddTab for that branch.
+    handleAddTab();
+  }
+
   onMount(() => {
     window.addEventListener(APP_EVENT.TAB_CLOSE_PROMPT, handleTabClosePromptEvent);
+    window.addEventListener(APP_EVENT.NEW_TAB, handleNewTabShortcut);
   });
   onDestroy(() => {
     window.removeEventListener(APP_EVENT.TAB_CLOSE_PROMPT, handleTabClosePromptEvent);
+    window.removeEventListener(APP_EVENT.NEW_TAB, handleNewTabShortcut);
   });
 </script>
 
@@ -586,7 +603,7 @@
     {#if $mode === 'rest'}
       <EnvPill />
     {/if}
-    {#if $mode !== 'agent' && $mode !== 'workspace'}
+    {#if $mode !== 'agent' && $mode !== 'workspace' && $mode !== 'history'}
       <button class="ai-toggle-btn" class:active={$aiPanelOpen} onclick={() => { aiPanelOpen.update(v => { const next = !v; aiPanelOpenPerMode.update(m => ({ ...m, [$mode]: next })); return next; }); }} title="AI Assistant">
         <svg viewBox="0 0 24 24"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/></svg>
       </button>

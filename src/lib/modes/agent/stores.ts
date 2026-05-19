@@ -1,39 +1,14 @@
 import { writable, get } from 'svelte/store';
 import type { AgentSession, AgentContext, ContextUsage, GitFileChange } from './types';
-import { AGENT_PROVIDERS } from './types';
-import { agentListSessions, agentListContexts, agentGitStatus, agentGitBranch, agentGitAheadBehind, agentGetSessionContextUsage, agentFetchUsageLimits, agentFetchCodexUsageLimits, agentUpdateTrayTitle, agentGetClaudePlan, agentCheckCliInstalled } from './commands';
+import { agentListSessions, agentListContexts, agentGitStatus, agentGitBranch, agentGitAheadBehind, agentGetSessionContextUsage, agentFetchUsageLimits, agentFetchCodexUsageLimits, agentUpdateTrayTitle, agentGetClaudePlan } from './commands';
 
 // Sessions
 export const agentSessions = writable<AgentSession[]>([]);
 export const activeAgentSession = writable<AgentSession | null>(null);
 
-// Provider install-state cache. Pre-warmed at app boot so the
-// "+ New Session" modal can render its provider tiles instantly
-// instead of waiting on a Promise.all of 4 `which <cli>` probes
-// (each can be slow on Windows / with network drives). The
-// `loadProviderInstallStates()` helper below populates this; the
-// New Session modal also calls it on open as a background refresh so
-// newly-installed CLIs become available without an app restart.
-export const providerInstallStates = writable<Record<string, boolean>>({ claude: true });
-
-/** Probe every supported CLI in parallel and update the cache.
- *  Called once at app boot (cheap pre-warm) and again from the
- *  New Session modal each time it opens (live refresh). Failures
- *  per-provider fall back to "claude assumed-installed, others
- *  unknown" — matches the old modal-local behaviour. */
-export async function loadProviderInstallStates(): Promise<void> {
-  const next: Record<string, boolean> = { ...get(providerInstallStates) };
-  await Promise.all(
-    AGENT_PROVIDERS.map(async (p) => {
-      try {
-        next[p.id] = await agentCheckCliInstalled(p.id);
-      } catch {
-        next[p.id] = p.id === 'claude';
-      }
-    }),
-  );
-  providerInstallStates.set(next);
-}
+// (The provider install-state pre-warm was removed: the New Session
+// modal no longer disables provider tiles. The spawn-time check still
+// triggers the per-provider install guide if/when a real spawn fails.)
 
 // Terminal tracking (frontend-only state)
 export const agentTerminalMap = writable<Map<string, any>>(new Map());

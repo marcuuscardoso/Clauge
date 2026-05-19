@@ -31,11 +31,30 @@ export const tabs = writable<Tab[]>([]);
 export const activeTabId = writable<number>(-1);
 export const draftRequests = writable<Map<number, Partial<DraftRequest>>>(new Map());
 
+// Per-mode memory of "the tab the user was most recently looking at in
+// this mode." Used by the sidebar so flipping Agent → REST → Agent
+// returns to the EXACT tab the user had focused, not just any tab of
+// that mode. Updated on every activation funnel (`activateTab`,
+// `addTab`, `closeTab`'s replacement pick) so callers never have to
+// touch it directly.
+export const lastActiveTabPerMode = writable<Map<TabMode, number>>(new Map());
+
+function recordActivation(id: number) {
+  const tab = get(tabs).find(t => t.id === id);
+  if (!tab) return;
+  lastActiveTabPerMode.update(m => {
+    const next = new Map(m);
+    next.set(tab.mode, id);
+    return next;
+  });
+}
+
 export function addTab(label: string, mode: TabMode, key: string | null, dot: string): Tab {
   const isNew = key === null;
   const tab: Tab = { id: nextId++, label, mode, key, dot, dirty: false, unsaved: isNew };
   tabs.update(t => [...t, tab]);
   activeTabId.set(tab.id);
+  recordActivation(tab.id);
   return tab;
 }
 
@@ -43,6 +62,17 @@ export function closeTab(id: number) {
   tabs.update(t => {
     const closingTab = t.find(x => x.id === id);
     const filtered = t.filter(x => x.id !== id);
+    // Sweep the per-mode memory: drop any entry whose tab just died,
+    // so the next visit to that mode falls back to creation-order
+    // instead of trying to focus a tab that no longer exists.
+    lastActiveTabPerMode.update(m => {
+      let changed = false;
+      const next = new Map(m);
+      for (const [mode, tabId] of next) {
+        if (tabId === id) { next.delete(mode); changed = true; }
+      }
+      return changed ? next : m;
+    });
     if (get(activeTabId) === id && filtered.length > 0) {
       // Prefer the most recent tab of the same mode as the closing tab —
       // keeps the user in their current mental context. Fall back to the
@@ -55,6 +85,7 @@ export function closeTab(id: number) {
         ? sameMode[sameMode.length - 1]
         : filtered[filtered.length - 1];
       activeTabId.set(next.id);
+      recordActivation(next.id);
     } else if (filtered.length === 0) {
       activeTabId.set(-1);
     }
@@ -65,6 +96,7 @@ export function closeTab(id: number) {
 
 export function activateTab(id: number) {
   activeTabId.set(id);
+  recordActivation(id);
 }
 
 export function updateTab(id: number, updates: Partial<Tab>) {

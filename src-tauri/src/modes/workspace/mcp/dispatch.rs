@@ -634,7 +634,7 @@ pub(super) async fn dispatch_tool(
             let column_id = req_str("columnId")?;
             let position = args.get("position").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             // Reuse the same review-flag rule the Tauri command applies:
-            // an agent moving to a "Review" column triggers pending review.
+            // an agent moving to an "In Review" column triggers pending review.
             let review_pending = {
                 let row: Option<(String,)> = sqlx::query_as(
                     "SELECT name FROM workspace_board_columns WHERE id = ?",

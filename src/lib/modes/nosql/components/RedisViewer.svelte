@@ -147,11 +147,37 @@
     consoleInput = '';
     commandHistory = [cmd, ...commandHistory.slice(0, 50)];
     historyIdx = -1;
+
+    // Client-side console builtins (shell-style, not Redis commands).
+    const verb = cmd.split(/\s+/)[0].toLowerCase();
+    if (verb === 'clear' || verb === 'cls') {
+      consoleHistory = [];
+      return;
+    }
+    if (verb === 'exit' || verb === 'quit') {
+      consoleHistory = [...consoleHistory, {
+        command: cmd,
+        result: '(this is a console pane, not a session — close the tab to exit)',
+        isError: false,
+      }];
+      requestAnimationFrame(() => { if (consoleEl) consoleEl.scrollTop = consoleEl.scrollHeight; });
+      return;
+    }
+    if (verb === 'help') {
+      consoleHistory = [...consoleHistory, {
+        command: cmd,
+        result: 'Console builtins: clear, cls, exit, quit, help\nEverything else is sent to Redis. Try: PING, KEYS *, INFO server',
+        isError: false,
+      }];
+      requestAnimationFrame(() => { if (consoleEl) consoleEl.scrollTop = consoleEl.scrollHeight; });
+      return;
+    }
+
     try {
       const result = await redisExecute(connectionId, cmd);
       consoleHistory = [...consoleHistory, { command: cmd, result, isError: false }];
     } catch (e: any) {
-      consoleHistory = [...consoleHistory, { command: cmd, result: String(e), isError: true }];
+      consoleHistory = [...consoleHistory, { command: cmd, result: formatRedisError(e), isError: true }];
     }
     requestAnimationFrame(() => {
       if (consoleEl) consoleEl.scrollTop = consoleEl.scrollHeight;
@@ -176,6 +202,25 @@
         consoleInput = '';
       }
     }
+  }
+
+  // Strip the redis-rs wrapper noise from server errors so console output
+  // reads like the redis-cli equivalent: "(error) ERR unknown command 'EXIT'".
+  function formatRedisError(e: any): string {
+    const raw = typeof e === 'string' ? e : (e?.message ?? String(e));
+    const m = raw.match(/unknown command\s+['"]?([^'",]+)['"]?/i);
+    if (m) {
+      return `(error) ERR unknown command '${m[1].toUpperCase()}'. Type 'help' for console builtins.`;
+    }
+    // "An error was signalled by the server - ResponseError: <real message>"
+    const respErr = raw.match(/ResponseError:\s*(.+?)(?:,\s*with args.*)?$/i);
+    if (respErr) {
+      return `(error) ${respErr[1].trim()}`;
+    }
+    // Strip the redis-rs prefix when present, keep the rest.
+    return raw
+      .replace(/^Redis error:\s*/i, '')
+      .replace(/^An error was signalled by the server\s*-\s*/i, '');
   }
 
   function formatValue(val: any): string {

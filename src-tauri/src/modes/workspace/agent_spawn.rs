@@ -250,10 +250,10 @@ pub async fn drawer_chat_turn(
     .map_err(|e| format!("DB error inserting agent reply: {e}"))?;
     let _ = session_repo::update_session_last_used(pool, &session.id, &reply_now).await;
 
-    // 6b. Server-side Todo → In Review fallback. Persona prompt asks
+    // 6b. Server-side Todo → In Progress fallback. Persona prompt asks
     //     the agent to move the card itself, but Claude follows ~70%
     //     of the time. Belt-and-braces: if the card is sitting in a
-    //     Todo-class column AND the board has an "In Review" column,
+    //     Todo-class column AND the board has an "In Progress" column,
     //     move it. Best-effort; failures are logged but never fail
     //     the turn.
     let _ = auto_advance_to_active(pool, card_id, &reply_actor, &reply_now).await;
@@ -424,7 +424,7 @@ async fn resolve_claim_and_project(
 }
 
 /// If the card lives in a "Todo" or "Backlog" column AND the same
-/// board has an "In Review" column, move the card there at position
+/// board has an "In Progress" column, move the card there at position
 /// 0. Columns are seeded from `repo::DEFAULT_BOARD_COLUMNS` and can't
 /// be renamed, so exact-name matching is enough.
 async fn auto_advance_to_active(
@@ -450,7 +450,7 @@ async fn auto_advance_to_active(
         return Ok(());
     }
     let target: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM workspace_board_columns WHERE board_id = ? AND name = 'In Review'",
+        "SELECT id FROM workspace_board_columns WHERE board_id = ? AND name = 'In Progress'",
     )
     .bind(&board_id)
     .fetch_optional(pool)
@@ -746,8 +746,8 @@ fn build_persona_prompt(
          \n\
          Card status: this card lives in a kanban column. If it's currently in a \
          column called 'Todo' (or similar) and you've started actively engaging, \
-         move it to 'In Review' via cards_move. When you're handing back for the user \
-         to review, move it to 'Review'. Use boards_read to discover the column ids.\n\
+         move it to 'In Progress' via cards_move. When you're handing back for the user \
+         to review, move it to 'In Review'. Use boards_read to discover the column ids.\n\
          \n\
          Code work: if (and only if) this turn requires you to modify files in the \
          project, call cards_start_work first to create an isolated git worktree + \

@@ -151,6 +151,8 @@ pub struct CloudPricing {
 pub struct CloudPricingPlan {
     pub id: String,
     pub price_usd: i64,
+    #[serde(default)]
+    pub credits: i64,
     pub discount: Option<CloudPricingDiscount>,
 }
 

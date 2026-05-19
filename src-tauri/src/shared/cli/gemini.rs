@@ -75,11 +75,16 @@ impl CliRunner for GeminiRunner {
     }
 
     fn build_spawn_command(&self, opts: &SpawnOpts) -> String {
+        let head = opts.binary_path_override.as_deref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(crate::shared::cli::runner::shell_quote_path)
+            .unwrap_or_else(|| BINARY.to_string());
         // Always pass `--skip-trust` so the spawn doesn't hang on an
         // unanswered trust prompt inside the PTY. Users can still review
         // workspaces via the standalone `gemini` flow if they want a
         // formal trust answer persisted.
-        let mut cmd = format!("{BINARY} --skip-trust");
+        let mut cmd = format!("{head} --skip-trust");
         // Resume: Gemini's --resume takes an integer index or the
         // literal "latest". UUIDs aren't accepted. Treat any well-shaped
         // session id we got back from `agent_resolve_resume_id` as a

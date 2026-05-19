@@ -6,9 +6,21 @@
     showSqlConnectionDialog, editingSqlConnection, getLiveId, loadTablesForDb,
     insertQueryText, connectToDatabase, getDbLiveId, dbLiveConnections,
     showSqlDisconnectConfirm, sqlDisconnectTarget,
-    sqlConnectionStates, sqlConnectionErrors, resetSqlConnState
+    sqlConnectionStates, sqlConnectionErrors, resetSqlConnState,
+    setBinding, getSqlTabData, sqlConnectionConfigVersion,
   } from '../stores';
+  import { addTab } from '$lib/shared/stores/tabs';
+  import { mode } from '$lib/stores/app';
   import { sqlListSchemas, sqlDescribeTable, sqlExecuteQuery, sqlCreateDatabase } from '../commands';
+
+  // Postgres is the only supported engine with a real "schema" layer below
+  // the database. MySQL/SQLite/ClickHouse/D1 treat schema and database as
+  // synonyms (or have no concept of either), so the tree skips the extra
+  // level for them and shows tables directly under the database.
+  function hasSchemaLayer(driver: string): boolean {
+    const d = driver.toLowerCase();
+    return d === 'postgres' || d === 'postgresql';
+  }
 
   // Pool keys are `${connId}:${db}` strings everywhere on the new model.
   // Helper to split them back into the (connId, db) shape the new IPC
@@ -210,6 +222,24 @@
     columnCache = new Map([...columnCache].filter(([k]) => !k.startsWith(prefix)));
   }
 
+  // Drop local caches whenever a saved connection's config is edited. The
+  // store bumps the version on every successful update — track the last
+  // version we observed per id so we only react to actual changes.
+  let seenConfigVersions = $state<Map<string, number>>(new Map());
+  $effect(() => {
+    const versions = $sqlConnectionConfigVersion;
+    let changed = false;
+    const next = new Map(seenConfigVersions);
+    for (const [id, v] of versions) {
+      if (next.get(id) !== v) {
+        clearConnectionCaches(id);
+        next.set(id, v);
+        changed = true;
+      }
+    }
+    if (changed) seenConfigVersions = next;
+  });
+
   // ── Database handlers ──
 
   async function handleClickDatabase(connId: string, db: string) {
@@ -222,6 +252,24 @@
     }
 
     expandedDbs = new Set([...expandedDbs, key]);
+
+    const conn = get(connections).find(c => c.id === connId);
+    if (!hasSchemaLayer(conn?.driver ?? '')) {
+      // Engines without a schema layer: load tables directly into tableCache
+      // under the db key, skipping the (synthetic) schema level entirely.
+      if (!tableCache.has(key)) {
+        loadingTables = new Set([...loadingTables, key]);
+        try {
+          await connectToDatabase(connId, db);
+          const tables = await (await import('../commands')).sqlListTables(connId, db, '');
+          tableCache = new Map([...tableCache, [key, tables]]);
+        } catch {
+          tableCache = new Map([...tableCache, [key, []]]);
+        }
+        loadingTables = new Set([...loadingTables].filter(k => k !== key));
+      }
+      return;
+    }
 
     if (!schemaCache.has(key)) {
       loadingSchemas = new Set([...loadingSchemas, key]);
@@ -243,6 +291,23 @@
     columnCache = new Map([...columnCache].filter(([k]) => !k.startsWith(dbKey)));
     expandedSchemas = new Set([...expandedSchemas].filter(k => !k.startsWith(dbKey)));
     expandedTables = new Set([...expandedTables].filter(k => !k.startsWith(dbKey)));
+
+    const conn = get(connections).find(c => c.id === connId);
+    const schemaless = !hasSchemaLayer(conn?.driver ?? '');
+
+    if (schemaless) {
+      loadingTables = new Set([...loadingTables, dbKey]);
+      try {
+        await connectToDatabase(connId, db);
+        const tables = await (await import('../commands')).sqlListTables(connId, db, '');
+        tableCache = new Map([...tableCache, [dbKey, tables]]);
+      } catch {
+        tableCache = new Map([...tableCache, [dbKey, []]]);
+      }
+      loadingTables = new Set([...loadingTables].filter(k => k !== dbKey));
+      showToast('Refreshed', 'success');
+      return;
+    }
 
     loadingSchemas = new Set([...loadingSchemas, dbKey]);
     try {
@@ -315,40 +380,63 @@
   }
 
   function qualifiedName(schema: string, name: string): string {
-    return (schema !== 'public' && schema !== 'default' && schema !== 'main')
-      ? `${schema}.${name}` : name;
+    if (!schema || schema === 'public' || schema === 'default' || schema === 'main') return name;
+    return `${schema}.${name}`;
   }
 
-  function hasActiveSqlTab(): boolean {
+  // Ensure there's a SQL tab bound to (connId, db) before injecting a query
+  // or as the result of a database/table double-click. The contract:
+  //  - Active tab is SQL with the same binding   → no-op (just inject)
+  //  - Active tab is SQL with a different binding → rebind in place
+  //  - Active tab is something else (or no tabs) → spawn a fresh SQL tab
+  // Always flips the global `mode` to 'sql' so the panel is visible.
+  // Tab `query` and `results` are preserved across rebinds (setBinding only
+  // touches binding/inFlight/error), so the user's in-progress editor
+  // content survives a connection swap.
+  function ensureSqlTabBoundTo(connId: string, db: string) {
     const allTabs = get(tabs);
     const activeId = get(activeTabId);
-    return allTabs.some(t => t.id === activeId && t.mode === 'sql');
+    const activeTab = allTabs.find(t => t.id === activeId && t.mode === 'sql');
+    const targetTab = activeTab ?? addTab('SQL', 'sql', null, 'var(--sql)');
+
+    const data = getSqlTabData(targetTab.id);
+    const alreadyBound =
+      data.binding?.connectionId === connId && data.binding?.database === db;
+    if (!alreadyBound) {
+      setBinding(targetTab.id, connId, db);
+    }
+    activeConnectionId.set(connId);
+    if (get(mode) !== 'sql') mode.set('sql');
   }
 
-  function insertQuery(query: string) {
-    if (!hasActiveSqlTab()) {
-      showToast('Open a query tab first', 'info');
-      return;
-    }
+  // Trigger the "+" button flow from a database double-click in the sidebar.
+  // No SQL tab open → creates one. SQL tab already open with a different
+  // (conn, db) → rebinds. Same binding → no-op (still focuses the tab).
+  function handleDatabaseDblClick(connId: string, db: string) {
+    ensureSqlTabBoundTo(connId, db);
+  }
+
+  function insertQuery(connId: string, db: string, query: string) {
+    ensureSqlTabBoundTo(connId, db);
     insertQueryText.set(query);
   }
 
-  function handleTableDblClick(schema: string, tableName: string) {
-    insertQuery(`SELECT * FROM ${qualifiedName(schema, tableName)} LIMIT 100;`);
+  function handleTableDblClick(connId: string, db: string, schema: string, tableName: string) {
+    insertQuery(connId, db, `SELECT * FROM ${qualifiedName(schema, tableName)} LIMIT 100;`);
   }
 
   // ── Query generators ──
 
-  function genSelectTop100(schema: string, table: string) {
-    insertQuery(`SELECT * FROM ${qualifiedName(schema, table)} LIMIT 100;`);
+  function genSelectTop100(connId: string, db: string, schema: string, table: string) {
+    insertQuery(connId, db, `SELECT * FROM ${qualifiedName(schema, table)} LIMIT 100;`);
   }
 
-  function genSelectCount(schema: string, table: string) {
-    insertQuery(`SELECT COUNT(*) FROM ${qualifiedName(schema, table)};`);
+  function genSelectCount(connId: string, db: string, schema: string, table: string) {
+    insertQuery(connId, db, `SELECT COUNT(*) FROM ${qualifiedName(schema, table)};`);
   }
 
-  function genDescribeTable(schema: string, table: string) {
-    insertQuery(`SELECT column_name, data_type, is_nullable, column_default
+  function genDescribeTable(connId: string, db: string, schema: string, table: string) {
+    insertQuery(connId, db, `SELECT column_name, data_type, is_nullable, column_default
 FROM information_schema.columns
 WHERE table_name = '${table}' AND table_schema = '${schema}'
 ORDER BY ordinal_position;`);
@@ -484,7 +572,7 @@ ORDER BY ordinal_position;`);
         label: 'New Query',
         icon: icons.newQuery,
         action: () => {
-          insertQuery(`-- Query on ${db}\n`);
+          insertQuery(connId, db, `-- Query on ${db}\n`);
         },
       },
       {
@@ -541,17 +629,17 @@ ORDER BY ordinal_position;`);
       {
         label: 'SELECT TOP 100',
         icon: icons.select,
-        action: () => genSelectTop100(schema, table),
+        action: () => genSelectTop100(connId, db, schema, table),
       },
       {
         label: 'SELECT COUNT(*)',
         icon: icons.count,
-        action: () => genSelectCount(schema, table),
+        action: () => genSelectCount(connId, db, schema, table),
       },
       {
         label: 'Describe Table',
         icon: icons.describe,
-        action: () => genDescribeTable(schema, table),
+        action: () => genDescribeTable(connId, db, schema, table),
       },
       { label: '', action: () => {}, separator: true },
       {
@@ -631,6 +719,68 @@ ORDER BY ordinal_position;`);
     return label;
   }
 </script>
+
+{#snippet renderTables(tables: TableInfo[], schema: string, db: string, connId: string, isLoadingTbl: boolean)}
+  {#if isLoadingTbl}
+    <div class="tree-loading" style="padding-left:38px">Loading tables...</div>
+  {:else if tables.length === 0}
+    <div class="tree-loading" style="padding-left:38px">No tables</div>
+  {:else}
+    {#each tables as table (table.name)}
+      {@const tableKey = `${connId}:${db}:${schema}:${table.name}`}
+      {@const isTableExpanded = expandedTables.has(tableKey)}
+      {@const columns = columnCache.get(tableKey) ?? []}
+      {@const isLoadingCol = loadingColumns.has(tableKey)}
+
+      <button
+        class="tree-item tree-table"
+        class:expanded={isTableExpanded}
+        onclick={() => handleClickTable(connId, db, schema, table.name)}
+        ondblclick={() => handleTableDblClick(connId, db, schema, table.name)}
+        oncontextmenu={(e) => showTableMenu(e, connId, db, schema, table.name)}
+      >
+        <svg class="tree-chevron-sm" class:open={isTableExpanded} viewBox="0 0 24 24">
+          <path d="M9 18l6-6-6-6"/>
+        </svg>
+        <svg class="tree-icon tree-icon-table" viewBox="0 0 24 24">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <path d="M3 9h18M3 15h18M9 3v18"/>
+        </svg>
+        <span class="tree-label">{table.name}</span>
+        <span class="table-ellipsis" role="button" tabindex="-1"
+          onclick={(e) => { e.stopPropagation(); showTableMenu(e, connId, db, schema, table.name); }}>
+          {@html icons.ellipsisH}
+        </span>
+      </button>
+
+      {#if isTableExpanded}
+        {#if isLoadingCol}
+          <div class="tree-loading" style="padding-left:48px">Loading columns...</div>
+        {:else if columns.length === 0}
+          <div class="tree-loading" style="padding-left:48px">No columns</div>
+        {:else}
+          {#each columns as col (col.name)}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="tree-item tree-column" oncontextmenu={(e) => showColumnMenu(e, col)}>
+              {#if col.isPrimaryKey}
+                <svg class="tree-icon tree-icon-pk" viewBox="0 0 24 24">
+                  <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+                </svg>
+              {:else}
+                <svg class="tree-icon tree-icon-col" viewBox="0 0 24 24">
+                  <rect x="8" y="4" width="8" height="16" rx="1.5" />
+                </svg>
+              {/if}
+              <span class="tree-label col-name">{col.name}</span>
+              <span class="col-type">{columnLabel(col)}</span>
+            </div>
+          {/each}
+        {/if}
+      {/if}
+    {/each}
+  {/if}
+{/snippet}
 
 <div class="sql-nav">
   {#if filteredConnections.length === 0}
@@ -718,6 +868,7 @@ ORDER BY ordinal_position;`);
             class="tree-item tree-db"
             class:expanded={isDbExpanded}
             onclick={() => handleClickDatabase(conn.id, db)}
+            ondblclick={() => handleDatabaseDblClick(conn.id, db)}
             oncontextmenu={(e) => showDbMenu(e, conn.id, db)}
           >
             <svg class="tree-chevron-sm" class:open={isDbExpanded} viewBox="0 0 24 24">
@@ -736,91 +887,39 @@ ORDER BY ordinal_position;`);
           </button>
 
           {#if isDbExpanded}
-            {#if isLoadingSchema}
-              <div class="tree-loading" style="padding-left:28px">Loading schemas...</div>
-            {:else}
-              {#each schemas as schema}
-                {@const schemaKey = `${conn.id}:${db}:${schema}`}
-                {@const isSchemaExpanded = expandedSchemas.has(schemaKey)}
-                {@const tables = tableCache.get(schemaKey) ?? []}
-                {@const isLoadingTbl = loadingTables.has(schemaKey)}
+            {#if hasSchemaLayer(conn.driver)}
+              {#if isLoadingSchema}
+                <div class="tree-loading" style="padding-left:28px">Loading schemas...</div>
+              {:else}
+                {#each schemas as schema}
+                  {@const schemaKey = `${conn.id}:${db}:${schema}`}
+                  {@const isSchemaExpanded = expandedSchemas.has(schemaKey)}
+                  {@const sTables = tableCache.get(schemaKey) ?? []}
+                  {@const sLoadingTbl = loadingTables.has(schemaKey)}
 
-                <button
-                  class="tree-item tree-schema"
-                  class:expanded={isSchemaExpanded}
-                  onclick={() => handleClickSchema(conn.id, db, schema)}
-                >
-                  <svg class="tree-chevron-sm" class:open={isSchemaExpanded} viewBox="0 0 24 24">
-                    <path d="M9 18l6-6-6-6"/>
-                  </svg>
-                  <svg class="tree-icon tree-icon-schema" viewBox="0 0 24 24">
-                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
-                  </svg>
-                  <span class="tree-label">{schema}</span>
-                </button>
+                  <button
+                    class="tree-item tree-schema"
+                    class:expanded={isSchemaExpanded}
+                    onclick={() => handleClickSchema(conn.id, db, schema)}
+                  >
+                    <svg class="tree-chevron-sm" class:open={isSchemaExpanded} viewBox="0 0 24 24">
+                      <path d="M9 18l6-6-6-6"/>
+                    </svg>
+                    <svg class="tree-icon tree-icon-schema" viewBox="0 0 24 24">
+                      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+                    </svg>
+                    <span class="tree-label">{schema}</span>
+                  </button>
 
-                {#if isSchemaExpanded}
-                  {#if isLoadingTbl}
-                    <div class="tree-loading" style="padding-left:38px">Loading tables...</div>
-                  {:else if tables.length === 0}
-                    <div class="tree-loading" style="padding-left:38px">No tables</div>
-                  {:else}
-                    {#each tables as table (table.name)}
-                      {@const tableKey = `${conn.id}:${db}:${schema}:${table.name}`}
-                      {@const isTableExpanded = expandedTables.has(tableKey)}
-                      {@const columns = columnCache.get(tableKey) ?? []}
-                      {@const isLoadingCol = loadingColumns.has(tableKey)}
-
-                      <button
-                        class="tree-item tree-table"
-                        class:expanded={isTableExpanded}
-                        onclick={() => handleClickTable(conn.id, db, schema, table.name)}
-                        ondblclick={() => handleTableDblClick(schema, table.name)}
-                        oncontextmenu={(e) => showTableMenu(e, conn.id, db, schema, table.name)}
-                      >
-                        <svg class="tree-chevron-sm" class:open={isTableExpanded} viewBox="0 0 24 24">
-                          <path d="M9 18l6-6-6-6"/>
-                        </svg>
-                        <svg class="tree-icon tree-icon-table" viewBox="0 0 24 24">
-                          <rect x="3" y="3" width="18" height="18" rx="2"/>
-                          <path d="M3 9h18M3 15h18M9 3v18"/>
-                        </svg>
-                        <span class="tree-label">{table.name}</span>
-                        <span class="table-ellipsis" role="button" tabindex="-1"
-                          onclick={(e) => { e.stopPropagation(); showTableMenu(e, conn.id, db, schema, table.name); }}>
-                          {@html icons.ellipsisH}
-                        </span>
-                      </button>
-
-                      {#if isTableExpanded}
-                        {#if isLoadingCol}
-                          <div class="tree-loading" style="padding-left:48px">Loading columns...</div>
-                        {:else if columns.length === 0}
-                          <div class="tree-loading" style="padding-left:48px">No columns</div>
-                        {:else}
-                          {#each columns as col (col.name)}
-                            <!-- svelte-ignore a11y_click_events_have_key_events -->
-                            <!-- svelte-ignore a11y_no_static_element_interactions -->
-                            <div class="tree-item tree-column" oncontextmenu={(e) => showColumnMenu(e, col)}>
-                              {#if col.isPrimaryKey}
-                                <svg class="tree-icon tree-icon-pk" viewBox="0 0 24 24">
-                                  <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
-                                </svg>
-                              {:else}
-                                <svg class="tree-icon tree-icon-col" viewBox="0 0 24 24">
-                                  <rect x="8" y="4" width="8" height="16" rx="1.5" />
-                                </svg>
-                              {/if}
-                              <span class="tree-label col-name">{col.name}</span>
-                              <span class="col-type">{columnLabel(col)}</span>
-                            </div>
-                          {/each}
-                        {/if}
-                      {/if}
-                    {/each}
+                  {#if isSchemaExpanded}
+                    {@render renderTables(sTables, schema, db, conn.id, sLoadingTbl)}
                   {/if}
-                {/if}
-              {/each}
+                {/each}
+              {/if}
+            {:else}
+              {@const dbTables = tableCache.get(dbKey) ?? []}
+              {@const dbLoadingTbl = loadingTables.has(dbKey)}
+              {@render renderTables(dbTables, '', db, conn.id, dbLoadingTbl)}
             {/if}
           {/if}
         {/each}

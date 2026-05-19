@@ -11,15 +11,17 @@
   const mod = platformMod();
 
   const shortcuts = [
+    [`${mod}+1…9`, 'Switch to Nth tab'],
+    [`${mod}+Shift+1…8`, 'Switch mode (Agent · Workspace · REST · SQL · NoSQL · SSH · Explorer · History)'],
+    [`${mod}+T`, 'New tab (current mode)'],
+    [`${mod}+W`, 'Close active tab'],
     [`${mod}+Enter`, 'Send request / Run query'],
-    [`${mod}+1`, 'Switch to REST'],
-    [`${mod}+2`, 'Switch to SQL'],
-    [`${mod}+3`, 'Switch to NoSQL'],
+    [`${mod}+S`, 'Save current request / query'],
     [`${mod}+B`, 'Toggle nav panel'],
-    [`${mod}+L`, 'Toggle AI assistant'],
+    [`${mod}+L`, 'Toggle AI panel · in Agent: shell panel'],
     [`${mod}+/`, 'Show shortcuts'],
     ['?', 'Show shortcuts (when not in input)'],
-    ['Escape', 'Close modal/overlay']
+    ['Escape', 'Close modal / overlay'],
   ];
 
   function close() {

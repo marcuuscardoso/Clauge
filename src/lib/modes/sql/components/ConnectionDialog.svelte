@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
   import Modal from '$lib/shared/primitives/Modal.svelte';
   import type { SqlConnectionConfig, SqlDriver, SqlConnection } from '../types';
   import { SQL_DIALECTS, defaultPortFor, descriptorFor } from '../dialects';
@@ -94,6 +95,27 @@
     const newDriver = (e.target as HTMLSelectElement).value as SqlDriver;
     driver = newDriver;
     port = defaultPortFor(newDriver);
+  }
+
+  async function browseForSqliteFile() {
+    const picked = await openFileDialog({
+      multiple: false,
+      directory: false,
+      title: 'Choose SQLite database file',
+      filters: [
+        { name: 'SQLite', extensions: ['db', 'sqlite', 'sqlite3', 'db3'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (typeof picked === 'string' && picked) {
+      database = picked;
+      // Default the connection name to the file's basename if the user
+      // hasn't typed one yet — saves a step for the common case.
+      if (!name.trim()) {
+        const base = picked.split(/[\\/]/).pop() ?? '';
+        if (base) name = base.replace(/\.[^.]+$/, '');
+      }
+    }
   }
 
   const usesHostPort = $derived(descriptorFor(driver)?.usesHostPort ?? false);
@@ -225,7 +247,16 @@
     {:else}
       <label class="conn-field">
         <span class="conn-label">{usesHostPort ? 'Database' : 'File Path'}</span>
-        <input class="conn-input" type="text" bind:value={database} placeholder={usesHostPort ? 'mydb' : '/path/to/db.sqlite'} />
+        {#if !usesHostPort}
+          <div class="conn-file-row">
+            <input class="conn-input" type="text" bind:value={database} placeholder="/path/to/db.sqlite" />
+            <button type="button" class="conn-file-btn" onclick={browseForSqliteFile} title="Choose a SQLite file">
+              Browse…
+            </button>
+          </div>
+        {:else}
+          <input class="conn-input" type="text" bind:value={database} placeholder="mydb" />
+        {/if}
       </label>
     {/if}
 
@@ -330,6 +361,31 @@
   }
   .conn-input:focus, .conn-select:focus {
     border-color: var(--acc);
+  }
+  .conn-file-row {
+    display: flex;
+    gap: 6px;
+  }
+  .conn-file-row .conn-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .conn-file-btn {
+    height: 32px;
+    padding: 0 12px;
+    background: var(--e);
+    border: 1px solid var(--b1);
+    border-radius: 6px;
+    color: var(--t1);
+    font-family: var(--ui);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    white-space: nowrap;
+  }
+  .conn-file-btn:hover {
+    border-color: var(--acc);
+    background: var(--b1);
   }
   .conn-input::placeholder {
     color: var(--t3);

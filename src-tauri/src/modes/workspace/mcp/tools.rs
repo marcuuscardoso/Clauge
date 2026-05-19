@@ -354,7 +354,7 @@ fn card_schemas() -> Vec<Value> {
         json!(
         {
             "name": "cards_move",
-            "description": "Move a card to a column / position. Moving an agent's card to a Review-class column auto-flags it as Pending review.",
+            "description": "Move a card to a column / position. Moving an agent's card to the In Review column auto-flags it as Pending review.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -398,13 +398,13 @@ fn card_schemas() -> Vec<Value> {
         json!(
         {
             "name": "cards_request_changes",
-            "description": "Send a card back from Review with structured feedback. Appends the feedback to the description (under a 'Review feedback' marker), clears the Pending-review flag, and (if columnId is provided) moves the card there — typically the 'In Review' column.",
+            "description": "Send a card back from In Review with structured feedback. Appends the feedback to the description (under a 'Review feedback' marker), clears the Pending-review flag, and (if columnId is provided) moves the card there — typically the 'In Progress' column.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
                     "feedback": { "type": "string" },
-                    "columnId": { "type": "string", "description": "Optional column to move the card to (e.g. the In Review column)." }
+                    "columnId": { "type": "string", "description": "Optional column to move the card to (e.g. the In Progress column)." }
                 },
                 "required": ["id", "feedback"]
             }
@@ -413,7 +413,7 @@ fn card_schemas() -> Vec<Value> {
         json!(
         {
             "name": "cards_list_pending_review",
-            "description": "List cards currently flagged as Pending review (i.e. an agent moved them into a Review column). Optionally scope to one workspace.",
+            "description": "List cards currently flagged as Pending review (i.e. an agent moved them into the In Review column). Optionally scope to one workspace.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

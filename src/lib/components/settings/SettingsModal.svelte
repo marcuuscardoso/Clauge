@@ -731,22 +731,22 @@
     // Fullscreen + Minimize differ by OS so they're branched.
     const m = mod();
     const SHORTCUTS: { desc: string; keys: string[] }[] = [
-        { desc: "Switch to Agent mode", keys: [m, "1"] },
-        { desc: "Switch to REST mode", keys: [m, "2"] },
-        { desc: "Switch to SQL mode", keys: [m, "3"] },
-        { desc: "Switch to NoSQL mode", keys: [m, "4"] },
-        { desc: "Send request / Execute query", keys: [m, "Enter"] },
-        { desc: "Save", keys: [m, "S"] },
+        { desc: "Switch to Nth tab", keys: [m, "1…9"] },
+        { desc: "Switch mode (Agent · Workspace · REST · SQL · NoSQL · SSH · Explorer · History)", keys: [m, "Shift", "1…8"] },
+        { desc: "New tab (current mode)", keys: [m, "T"] },
         { desc: "Close active tab", keys: [m, "W"] },
+        { desc: "Send request / Run query", keys: [m, "Enter"] },
+        { desc: "Save current request / query", keys: [m, "S"] },
         { desc: "Toggle nav sidebar", keys: [m, "B"] },
-        { desc: "Toggle AI assistant", keys: [m, "L"] },
+        { desc: "Toggle AI panel · in Agent: shell panel", keys: [m, "L"] },
         { desc: "Show shortcuts overlay", keys: [m, "/"] },
+        { desc: "Show shortcuts overlay (not in input)", keys: ["?"] },
+        { desc: "Close modal / overlay", keys: ["Esc"] },
         {
             desc: "Toggle fullscreen",
             keys: isMac() ? ["Cmd", "Ctrl", "F"] : ["F11"],
         },
         ...(isMac() ? [{ desc: "Minimize window", keys: ["Cmd", "M"] }] : []),
-        { desc: "Close modal / overlay", keys: ["Esc"] },
     ];
 
     async function handleSettingChange(key: string, value: string) {

@@ -20,13 +20,13 @@ fn is_git_repo(path: &str) -> bool {
     std::path::Path::new(path).join(".git").exists()
 }
 
-/// True for the canonical "Review" safety-gate column (NOT "In Review",
+/// True for the canonical "In Review" safety-gate column (NOT "In Progress",
 /// which is the active-work column). Columns are seeded from
 /// `repo::DEFAULT_BOARD_COLUMNS` and can't be renamed by the user, so
 /// exact equality is enough. Used to decide if an agent move into a
 /// column should auto-flag `review_pending=1`.
 pub fn is_review_only_column(name: &str) -> bool {
-    name == "Review"
+    name == "In Review"
 }
 
 /// Discovered subproject — used when the workspace folder isn't a git
@@ -676,8 +676,8 @@ pub async fn workspace_card_move(
     let review_pending = if is_user {
         0
     } else {
-        // Agent moving into the "Review" safety-gate column flags
-        // pending review. "In Review" is the active-work column and
+        // Agent moving into the "In Review" safety-gate column flags
+        // pending review. "In Progress" is the active-work column and
         // does NOT trigger the flag.
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT name FROM workspace_board_columns WHERE id = ?",
@@ -2043,19 +2043,18 @@ pub struct CoworkerInput {
 #[tauri::command]
 pub async fn workspace_coworker_create(
     pool: State<'_, SqlitePool>,
+    pro_state: State<'_, crate::cloud::pro_state::ProStateManager>,
     input: CoworkerInput,
 ) -> Result<WorkspaceCoworker, String> {
     let name = input.name.trim();
     if name.is_empty() {
         return Err("Coworker name is required".into());
     }
-    let plan = settings_repo::get_by_key(pool.inner(), "cloud:plan")
-        .await
-        .ok()
-        .flatten()
-        .map(|s| s.value);
-    let is_pro = plan.as_deref() == Some("pro");
-    if !is_pro {
+    // Single source of truth: the in-memory ProStateManager. Replaces the
+    // SQLite read + the `is_pro_hint` workaround that was needed when the
+    // gate raced against an in-flight `cloud_auth` write. The manager is
+    // updated atomically on every plan change so this read is never stale.
+    if !pro_state.is_pro() {
         let active_count = coworker_repo::count_active(pool.inner())
             .await
             .unwrap_or(0);

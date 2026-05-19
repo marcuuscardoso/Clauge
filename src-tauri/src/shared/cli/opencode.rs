@@ -74,6 +74,11 @@ impl CliRunner for OpenCodeRunner {
     }
 
     fn build_spawn_command(&self, opts: &SpawnOpts) -> String {
+        let head = opts.binary_path_override.as_deref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(crate::shared::cli::runner::shell_quote_path)
+            .unwrap_or_else(|| BINARY.to_string());
         // Bare `opencode` launches the TUI. `-s <id>` resumes a specific
         // session; `-c` would continue the last. OpenCode session ids
         // are `ses_<base62>` — anything else (e.g. a Codex UUID that
@@ -81,7 +86,7 @@ impl CliRunner for OpenCodeRunner {
         // `opencode -s` reject the spawn with "Expected ses, got …".
         // Drop the resume arg silently in that case and start fresh
         // rather than crashing the terminal.
-        let mut cmd = String::from(BINARY);
+        let mut cmd = head;
         if let Some(ref sid) = opts.resume_session_id {
             if sid.starts_with("ses_") {
                 cmd.push_str(&format!(" -s \"{}\"", sid));
@@ -91,13 +96,14 @@ impl CliRunner for OpenCodeRunner {
             // OpenCode mirrors Claude's flag name verbatim.
             cmd.push_str(" --dangerously-skip-permissions");
         }
-        // OpenCode has no free-form `--system-prompt` analogue — the
-        // only way to bias behaviour is via a pre-defined `opencode
-        // agent` definition or by writing an `AGENTS.md` at the project
-        // root (which the agent_inject_contexts path now does for us).
-        // We silently drop the spawn-time system_prompt here; the
-        // context-injection path covers persistent persona, the user's
-        // first message carries any ad-hoc prompt.
+        // OpenCode has no free-form `--system-prompt` analogue. The
+        // session's purpose / Custom prompt is instead written into
+        // `AGENTS.md` at the project root pre-spawn (mirroring the
+        // Gemini path) — see `agent_inject_purpose` in
+        // modes/agent/commands.rs and its trigger in AgentPanel. We
+        // consume the field here so the spawn opts stay uniform
+        // across runners; the actual prompt delivery happens via the
+        // file write before this command runs.
         let _ = opts.system_prompt;
         cmd
     }

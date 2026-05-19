@@ -233,11 +233,35 @@ export async function deleteConnection(id: string) {
   });
 }
 
+// Bumped whenever a saved connection's config is updated. Components that
+// keep their own per-connection caches (e.g. SqlNav's schema/table/column
+// maps) watch this map and clear the affected entries — without it, an edit
+// to e.g. a SQLite file path would still surface the old file's tree.
+export const sqlConnectionConfigVersion = writable<Map<string, number>>(new Map());
+function bumpConnectionConfigVersion(id: string) {
+  sqlConnectionConfigVersion.update((m) => {
+    const n = new Map(m);
+    n.set(id, (n.get(id) ?? 0) + 1);
+    return n;
+  });
+}
+
 export async function handleSqlConnectionSave(config: SqlConnectionConfig) {
   const editing = get(editingSqlConnection);
   if (editing) {
     const updated = await sqlCmd.sqlUpdateSavedConnection(editing.id, config);
     connections.update((c) => c.map((x) => (x.id === editing.id ? updated : x)));
+    // Backend already drops its pools on update — also clear the frontend
+    // store-level caches so the UI doesn't show stale databases/tables, and
+    // notify components with local caches to invalidate via the version bump.
+    connectionDatabases.update((m) => { const n = new Map(m); n.delete(editing.id); return n; });
+    databaseTables.update((m) => {
+      const n = new Map(m);
+      const prefix = `${editing.id}:`;
+      for (const k of [...n.keys()]) if (k.startsWith(prefix)) n.delete(k);
+      return n;
+    });
+    bumpConnectionConfigVersion(editing.id);
   } else {
     const conn = await saveConnection(config);
     // Auto-bind the active tab to the newly saved connection's default DB.

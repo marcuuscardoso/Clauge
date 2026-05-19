@@ -175,6 +175,19 @@
     }
   }
 
+  async function handleDblClickConnection(conn: NoSqlConnection) {
+    // Mongo's open-in-tab unit is a collection (single-click in the tree).
+    // Redis has no collections — the connection itself is the unit, so a
+    // double-click on the row opens a dedicated Redis tab (Keys + Console).
+    if (conn.driver !== 'redis') return;
+    activeNoSqlConnectionId.set(conn.id);
+    if (!$connectedNoSqlIds.has(conn.id)) {
+      await doConnect(conn);
+      if (!$connectedNoSqlIds.has(conn.id)) return;
+    }
+    openNoSqlCollection.set({ connectionId: conn.id });
+  }
+
   async function doConnect(conn: NoSqlConnection) {
     // The store guards against duplicate connects, but bail early too so we
     // don't surface a toast for the no-op case.
@@ -182,7 +195,9 @@
     try {
       await connectToNoSql(conn.id);
       showToast(`Connected to ${conn.name}`, 'success');
-      await loadDatabases(conn.id);
+      // Database/collection tree is MongoDB-only; Redis browses keys in the
+      // panel viewer instead, so skip the (mongo-only) list-databases call.
+      if (conn.driver === 'mongodb') await loadDatabases(conn.id);
     } catch (e: any) {
       showToast(friendlyError(e), 'error');
     }
@@ -230,7 +245,8 @@
     if (next.has(connId)) next.delete(connId);
     else {
       next.add(connId);
-      if (!dbCache.has(connId)) loadDatabases(connId);
+      const conn = $nosqlConnections.find(c => c.id === connId);
+      if (conn?.driver === 'mongodb' && !dbCache.has(connId)) loadDatabases(connId);
     }
     expandedConns = next;
   }
@@ -291,7 +307,8 @@
     e.preventDefault();
     e.stopPropagation();
     const isConnected = $connectedNoSqlIds.has(conn.id);
-    const connString = conn.connectionString || `mongodb://${conn.host}:${conn.port}`;
+    const scheme = conn.driver === 'redis' ? 'redis' : 'mongodb';
+    const connString = conn.connectionString || `${scheme}://${conn.host}:${conn.port}`;
 
     showContextMenu(e.clientX, e.clientY, [
       ...(isConnected ? [
@@ -299,6 +316,12 @@
           label: 'Refresh',
           icon: icons.refresh,
           action: async () => {
+            // Redis browses keys in the panel viewer (it has its own Scan
+            // button), so the nav-level refresh only applies to Mongo.
+            if (conn.driver !== 'mongodb') {
+              showToast('Refreshed', 'success');
+              return;
+            }
             dbCache = new Map([...dbCache].filter(([k]) => k !== conn.id));
             collCache = new Map([...collCache].filter(([k]) => !k.startsWith(`${conn.id}:`)));
             await loadDatabases(conn.id);
@@ -478,6 +501,7 @@
           class:errored={hasError}
           title={hasError ? errorMsg : ''}
           onclick={() => handleClickConnection(conn)}
+          ondblclick={() => handleDblClickConnection(conn)}
           oncontextmenu={(e) => showConnMenu(e, conn)}
         >
           <div class="coll-icon">
@@ -500,7 +524,7 @@
             <button
               class="coll-menu"
               title="Refresh"
-              onclick={async (e) => { e.stopPropagation(); dbCache = new Map([...dbCache].filter(([k]) => k !== conn.id)); collCache = new Map([...collCache].filter(([k]) => !k.startsWith(`${conn.id}:`))); await loadDatabases(conn.id); const dbs = dbCache.get(conn.id) ?? []; for (const db of dbs) { const key = `${conn.id}:${db}`; if (expandedDbs.has(key)) loadCollections(conn.id, db); } }}
+              onclick={async (e) => { e.stopPropagation(); if (conn.driver !== 'mongodb') { showToast('Refreshed', 'success'); return; } dbCache = new Map([...dbCache].filter(([k]) => k !== conn.id)); collCache = new Map([...collCache].filter(([k]) => !k.startsWith(`${conn.id}:`))); await loadDatabases(conn.id); const dbs = dbCache.get(conn.id) ?? []; for (const db of dbs) { const key = `${conn.id}:${db}`; if (expandedDbs.has(key)) loadCollections(conn.id, db); } showToast('Refreshed', 'success'); }}
             >
               {@html icons.refresh}
             </button>
@@ -512,9 +536,11 @@
           >
             {@html icons.ellipsisV}
           </button>
-          <svg class="ncoll-arr" class:open={(isExpanded || searchQuery) && !collapsedDuringSearch.has(`conn:${conn.id}`)} viewBox="0 0 24 24">
-            <path d="M9 18l6-6-6-6" stroke="currentColor" fill="none" stroke-width="1.8" stroke-linecap="round"/>
-          </svg>
+          {#if conn.driver === 'mongodb'}
+            <svg class="ncoll-arr" class:open={(isExpanded || searchQuery) && !collapsedDuringSearch.has(`conn:${conn.id}`)} viewBox="0 0 24 24">
+              <path d="M9 18l6-6-6-6" stroke="currentColor" fill="none" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          {/if}
         </div>
 
       <!-- Tree: databases → collections -->

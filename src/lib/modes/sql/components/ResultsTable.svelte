@@ -9,6 +9,7 @@
   import { sqlExecuteQuery } from '../commands';
   import { friendlyError } from '$lib/utils/errors';
   import { APP_EVENT } from '$lib/shared/constants/events';
+  import Modal from '$lib/shared/primitives/Modal.svelte';
 
   interface Props {
     result: SqlQueryResult | null;
@@ -562,7 +563,7 @@
       </div>
       <div class="rt-empty-text">Execute a query to see results</div>
     </div>
-  {:else if result.columns.length === 0}
+  {:else if result.queryKind === 'dml' || result.queryKind === 'ddl'}
     <div class="rt-stats">
       <div class="rt-stats-head">
         <div class="rt-stats-col-name">Name</div>
@@ -618,14 +619,6 @@
           </tr>
         </thead>
         <tbody>
-          {#if result.rows.length === 0}
-            <tr class="rt-no-rows">
-              <td colspan={result.columns.length + 1}>
-                <div class="rt-no-rows-text">No rows returned</div>
-                <div class="rt-no-rows-meta">Query ran in {result.durationMs}ms</div>
-              </td>
-            </tr>
-          {/if}
           {#if spacerTop > 0}
             <tr style="height:{spacerTop}px" aria-hidden="true">
               <td colspan={result.columns.length + 1} style="padding:0;border:none"></td>
@@ -672,6 +665,20 @@
           {/if}
         </tbody>
       </table>
+      {#if result.rows.length === 0}
+        <!-- Empty-result overlay. Sits inside the scroll container, offset
+             below the sticky thead, centered in the remaining height. No
+             border-bottom line; reads as a deliberate empty state. -->
+        <div class="rt-empty-overlay">
+          <svg class="rt-no-rows-icon" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+          </svg>
+          <div class="rt-no-rows-text">No rows returned</div>
+          <div class="rt-no-rows-meta">Query ran in {result.durationMs}ms</div>
+        </div>
+      {/if}
     </div>
 
     <div class="rt-footer">
@@ -741,36 +748,30 @@
 {/if}
 
 <!-- Save Confirmation Modal -->
-{#if showSaveModal}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="rt-save-overlay" onclick={(e) => { if (e.target === e.currentTarget) showSaveModal = false; }}>
-    <div class="rt-save-modal">
-      <div class="rt-save-header">
-        <span class="rt-save-title">Review Changes</span>
-        <span class="rt-save-db">{databaseName || 'Unknown database'}</span>
-        <button class="rt-save-close" onclick={() => showSaveModal = false}>&times;</button>
-      </div>
-      <div class="rt-save-body">
-        <div class="rt-save-count">{saveStatements.length} statement{saveStatements.length !== 1 ? 's' : ''} will be executed:</div>
-        <div class="rt-save-sql">
-          {#each saveStatements as stmt, i}
-            <div class="rt-save-stmt">
-              <span class="rt-save-ln">{i + 1}</span>
-              <span class="rt-save-code">{stmt}</span>
-            </div>
-          {/each}
-        </div>
-      </div>
-      <div class="rt-save-footer">
-        <button class="rt-save-cancel" onclick={() => showSaveModal = false}>Cancel</button>
-        <button class="rt-save-execute" disabled={savingChanges} onclick={executeSave}>
-          {savingChanges ? 'Executing...' : 'Execute'}
-        </button>
-      </div>
+<Modal bind:show={showSaveModal} title="Review Changes" width="560px">
+  {#snippet children()}
+    <div class="rt-save-meta">
+      <span class="rt-save-db">{databaseName || 'Unknown database'}</span>
+      <span class="rt-save-count">
+        {saveStatements.length} statement{saveStatements.length !== 1 ? 's' : ''} will be executed
+      </span>
     </div>
-  </div>
-{/if}
+    <div class="rt-save-sql">
+      {#each saveStatements as stmt, i}
+        <div class="rt-save-stmt">
+          <span class="rt-save-ln">{i + 1}</span>
+          <span class="rt-save-code">{stmt}</span>
+        </div>
+      {/each}
+    </div>
+    <div class="rt-save-footer">
+      <button class="rt-save-cancel" onclick={() => showSaveModal = false}>Cancel</button>
+      <button class="rt-save-execute" disabled={savingChanges} onclick={executeSave}>
+        {savingChanges ? 'Executing…' : 'Execute'}
+      </button>
+    </div>
+  {/snippet}
+</Modal>
 
 <style>
   .results-table {
@@ -887,17 +888,34 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
-  .rt-no-rows td {
-    padding: 36px 16px;
-    text-align: center;
-    border-bottom: 1px solid var(--b1);
-    background: transparent;
+  /* Empty-result overlay — absolute-positioned inside `.rt-scroll` (which
+     is position: relative). Offset `top` clears the sticky thead so the
+     icon + label sit centered in the rows region, not over the headers.
+     pointer-events: none so the scroll surface stays interactive. */
+  .rt-empty-overlay {
+    position: absolute;
+    top: 36px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    pointer-events: none;
+  }
+  .rt-no-rows-icon {
+    color: var(--t4);
+    opacity: 0.5;
+    margin-bottom: 6px;
   }
   .rt-no-rows-text {
-    font-size: 12.5px;
-    color: var(--t3);
-    font-family: var(--mono);
-    margin-bottom: 4px;
+    font-size: 13px;
+    color: var(--t2);
+    font-family: var(--ui);
+    font-weight: 500;
+    letter-spacing: -0.005em;
   }
   .rt-no-rows-meta {
     font-size: 11px;
@@ -910,7 +928,7 @@
    * bounce when scrolling past the top or bottom of the results. The
    * default elastic overscroll reads as "web page", not "desktop app";
    * suppressing it makes fast scrolls stop crisply at the boundary. */
-  .rt-scroll { flex: 1; overflow: auto; overscroll-behavior: none; }
+  .rt-scroll { position: relative; flex: 1; overflow: auto; overscroll-behavior: none; }
   .rt-scroll.resizing { user-select: none; }
   .rt-scroll::-webkit-scrollbar { width: 4px; height: 4px; }
   .rt-scroll::-webkit-scrollbar-thumb { background: var(--b1); border-radius: 2px; }
@@ -1077,42 +1095,25 @@
   .rt-ctx-danger:hover { background: rgba(240,68,68,0.1); color: var(--err); }
   .rt-ctx-sep { height: 1px; background: var(--b1); margin: 4px 0; }
 
-  /* Save confirmation modal */
-  .rt-save-overlay {
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: var(--scrim-strong);
-    z-index: var(--z-modal); display: flex; align-items: center; justify-content: center;
-    animation: fadeIn 0.12s ease;
+  /* Inner content of the "Review Changes" preview.
+     The modal frame (overlay, card, header, close button) comes from the
+     shared Modal primitive — only the body content + footer live here. */
+  .rt-save-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: -4px 0 12px;
   }
-  .rt-save-modal {
-    background: var(--modal-bg, var(--n)); border: 1px solid var(--b1);
-    border-radius: 12px; box-shadow: 0 24px 48px rgba(0,0,0,0.5);
-    width: 560px; max-height: 80vh; display: flex; flex-direction: column;
-    overflow: hidden; animation: slideIn 0.15s ease;
-  }
-  @keyframes slideIn { from { opacity: 0; transform: translateY(-8px) scale(0.98); } to { opacity: 1; } }
-  .rt-save-header {
-    display: flex; align-items: center; gap: 10px;
-    padding: 14px 18px; border-bottom: 1px solid var(--b1); background: var(--n2);
-  }
-  .rt-save-title { font-size: 14px; font-weight: 600; color: var(--t1); font-family: var(--ui); }
   .rt-save-db {
     font-size: 10px; font-family: var(--mono); color: var(--acc);
     background: color-mix(in srgb, var(--acc) 12%, transparent);
     padding: 2px 8px; border-radius: 4px; font-weight: 600;
   }
-  .rt-save-close {
-    margin-left: auto; width: 28px; height: 28px; border-radius: 6px;
-    border: 1px solid var(--b1); background: transparent; color: var(--t3);
-    font-size: 16px; cursor: default; display: flex; align-items: center;
-    justify-content: center; transition: background 0.1s;
-  }
-  .rt-save-close:hover { background: var(--c); color: var(--t1); }
-  .rt-save-body { padding: 16px 18px; overflow-y: auto; flex: 1; }
-  .rt-save-count { font-size: 12px; color: var(--t2); font-family: var(--ui); margin-bottom: 10px; }
+  .rt-save-count { font-size: 12px; color: var(--t2); font-family: var(--ui); }
   .rt-save-sql {
     background: var(--surface-hover); border: 1px solid var(--b1);
     border-radius: 6px; overflow: hidden;
+    max-height: 360px; overflow-y: auto;
   }
   .rt-save-stmt {
     display: flex; padding: 6px 0; border-bottom: 1px solid color-mix(in srgb, var(--b1) 50%, transparent);
@@ -1129,20 +1130,24 @@
   }
   .rt-save-footer {
     display: flex; justify-content: flex-end; gap: 8px;
-    padding: 14px 18px; border-top: 1px solid var(--b1);
+    /* Bleed the footer to the modal body's padding edges so the top
+       divider lines up with the card edges instead of floating inside. */
+    margin: 16px -24px -20px;
+    padding: 12px 24px;
+    border-top: 1px solid var(--b1);
   }
   .rt-save-cancel {
-    height: 30px; padding: 0 14px; border-radius: 6px;
+    height: 30px; padding: 0 16px; border-radius: 8px;
     border: 1px solid var(--b1); background: transparent;
-    color: var(--t2); font-size: 12px; font-family: var(--ui); cursor: default;
+    color: var(--t2); font-size: 12px; font-family: var(--ui); cursor: pointer;
     transition: border-color 0.1s, color 0.1s;
   }
   .rt-save-cancel:hover { border-color: var(--b2); color: var(--t1); }
   .rt-save-execute {
-    height: 30px; padding: 0 18px; border-radius: 6px;
+    height: 30px; padding: 0 16px; border-radius: 8px;
     border: none; background: var(--acc); color: #fff;
-    font-size: 12px; font-weight: 600; font-family: var(--ui); cursor: default;
-    transition: opacity 0.1s;
+    font-size: 12px; font-weight: 600; font-family: var(--ui); cursor: pointer;
+    transition: opacity 0.12s;
   }
   .rt-save-execute:hover:not(:disabled) { opacity: 0.85; }
   .rt-save-execute:disabled { opacity: 0.4; cursor: not-allowed; }

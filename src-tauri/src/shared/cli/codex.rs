@@ -59,6 +59,11 @@ impl CliRunner for CodexRunner {
     }
 
     fn build_spawn_command(&self, opts: &SpawnOpts) -> String {
+        let head = opts.binary_path_override.as_deref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(crate::shared::cli::runner::shell_quote_path)
+            .unwrap_or_else(|| BINARY.to_string());
         let mut cmd = match opts.resume_session_id.as_deref() {
             // Codex session ids are UUIDs (`<hex>-<hex>-<hex>-<hex>-<hex>`
             // with 8-4-4-4-12 layout). Anything else (e.g. an OpenCode
@@ -66,9 +71,9 @@ impl CliRunner for CodexRunner {
             // would either be rejected or silently treated as a thread
             // name. Be defensive: spawn fresh on a malformed id.
             Some(sid) if looks_like_uuid(sid) => {
-                format!("{BINARY} resume \"{}\"", sid)
+                format!("{head} resume \"{}\"", sid)
             }
-            _ => String::from(BINARY),
+            _ => head,
         };
         if opts.skip_permissions {
             cmd.push_str(" --dangerously-bypass-approvals-and-sandbox");

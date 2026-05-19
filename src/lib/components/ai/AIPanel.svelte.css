@@ -1043,12 +1043,33 @@
     40% { opacity: 1; transform: scale(1); }
   }
 
-  /* Input area */
-  .ai-input-area {
+  /* Prompt footer — selector pill + (Clauge AI only) static allowance chip.
+     Sits just above the input area, sharing its background to read as one
+     continuous composer block. Position: relative so the selector's popover
+     can anchor upward against this row. */
+  .ai-prompt-footer {
+    position: relative;
     flex-shrink: 0;
     border-top: 1px solid var(--b1);
     background: var(--n2);
-    padding: 10px 14px;
+    padding: 8px 14px 4px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 32px;
+  }
+  .ai-prompt-footer-left {
+    position: relative; /* popover anchors here so it pops above the pill */
+    display: flex;
+    align-items: center;
+  }
+  /* Input area — drops its top border because the footer above already
+     provides the separator from the message list. */
+  .ai-input-area {
+    flex-shrink: 0;
+    background: var(--n2);
+    padding: 4px 14px 10px;
     display: flex;
     align-items: flex-end;
     gap: 8px;

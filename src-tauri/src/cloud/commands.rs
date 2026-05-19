@@ -6,9 +6,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::cloud::auth::{self, AuthState};
 use crate::cloud::client::{self, CloudError};
-use crate::cloud::config::{settings_key_synced_at, SETTINGS_KEY_HAS_SYNCED, SETTINGS_KEY_PLAN};
+use crate::cloud::config::{settings_key_synced_at, SETTINGS_KEY_HAS_SYNCED};
 use crate::cloud::domains::ALL_KINDS;
 use crate::cloud::models::{CloudAiBalance, CloudAiUsage, CloudPricing, CloudStatus, CloudUser};
+use crate::cloud::pro_state::ProStateManager;
 use crate::cloud::scheduler::Scheduler;
 use crate::cloud::sync;
 use crate::cloud::{ai as ai_client, billing as billing_client};
@@ -21,6 +22,7 @@ pub async fn cloud_get_status(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
 ) -> Result<CloudStatus, String> {
     let snap = state.snapshot();
     if !state.is_connected() {
@@ -28,17 +30,20 @@ pub async fn cloud_get_status(
     }
 
     // Fetch fresh `me` from the server. The client::me path now
-    // self-refreshes on 401 (Google only — see
-    // `with_google_refresh_retry`), so by the time we get here:
+    // self-refreshes on 401 (Google only — see `with_google_refresh_retry`),
+    // so by the time we get here:
     //   • Ok       → token was either valid or successfully refreshed.
-    //   • NotAuth  → refresh exhausted / no refresh path; clear local
-    //                auth and tell the UI we're signed out. Returning
-    //                CloudStatus::default with connected:false flips
-    //                the avatar back to the sign-in prompt instead of
-    //                rendering an empty user card.
-    //   • Other    → network / 5xx; keep partial state so the UI can
-    //                render "we have a token, server is unreachable"
-    //                without losing the in-keychain identity.
+    //                Route the response through ProStateManager — that
+    //                runs the Pro↔Free transition hooks (coworker
+    //                disable/enable), persists the snapshot, and emits
+    //                cloud:pro-state for the frontend.
+    //   • NotAuth  → refresh exhausted / no refresh path; ask the manager
+    //                to clear (runs the Pro→Free hook based on in-memory
+    //                state, immune to the SQLite-key-already-deleted race)
+    //                then wipe auth tokens.
+    //   • Other    → network / 5xx; keep partial state, leave the manager
+    //                untouched so a transient outage doesn't fake a
+    //                downgrade.
     match client::me(pool.inner(), &state).await {
         Ok(me) => {
             let mut last_synced = std::collections::HashMap::new();
@@ -48,46 +53,26 @@ pub async fn cloud_get_status(
                 }
             }
 
-            // Detect plan transitions before persisting the new value.
-            let old_plan: Option<String> = settings::get_by_key(pool.inner(), SETTINGS_KEY_PLAN)
-                .await
-                .ok()
-                .flatten()
-                .map(|s| s.value);
-            let new_plan = me.plan.clone();
-
-            let _ = settings::upsert(pool.inner(), SETTINGS_KEY_PLAN, &new_plan).await;
-
-            // Pro → free: freeze coworkers beyond the first 3.
-            if old_plan.as_deref() == Some("pro") && new_plan != "pro" {
-                let disabled = crate::shared::repos::coworkers::disable_beyond_first_n(pool.inner(), 3)
-                    .await
-                    .unwrap_or(0);
-                if disabled > 0 {
-                    let _ = app.emit(
-                        "cloud:plan_lapsed",
-                        serde_json::json!({ "disabled_coworkers": disabled }),
-                    );
-                }
-            }
-
-            // Free → pro: restore all coworkers.
-            if old_plan.as_deref() != Some("pro") && new_plan == "pro" {
-                let _ = crate::shared::repos::coworkers::enable_all(pool.inner()).await;
-                let _ = app.emit("cloud:plan_upgraded", serde_json::json!({}));
-            }
+            pro_state
+                .apply_from_entitlements(&me.entitlements, Some(&me.plan), &app, pool.inner())
+                .await?;
 
             Ok(CloudStatus {
                 connected: true,
                 active_provider: snap.active_provider,
                 user: Some(me.user),
                 providers: me.providers,
-                plan: new_plan,
+                plan: me.plan,
                 last_synced,
                 entitlements: Some(me.entitlements),
             })
         }
         Err(CloudError::NotAuthenticated) => {
+            // Manager.clear FIRST so the downgrade hook reads in-memory
+            // Pro state (still valid) and runs disable_beyond_first_n
+            // BEFORE auth::clear wipes the SQLite key it used to depend
+            // on. Then auth::clear tears down tokens + settings.
+            let _ = pro_state.clear(&app, pool.inner()).await;
             let _ = auth::clear(&state, pool.inner()).await;
             Ok(CloudStatus::default())
         }
@@ -129,6 +114,7 @@ pub async fn cloud_exchange_code(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
     provider: String,
     code: String,
 ) -> Result<CloudStatus, String> {
@@ -138,6 +124,12 @@ pub async fn cloud_exchange_code(
             let token = resp.token.clone().ok_or_else(|| "missing token".to_string())?;
             auth::store_github(&state, pool.inner(), &token, resp.user.user_id).await?;
             after_login(&app, pool.inner(), &state).await?;
+            // Eagerly populate manager from the exchange response so the
+            // Free→Pro hook fires immediately (no wait for the first
+            // cloud_get_status round trip).
+            pro_state
+                .apply_from_entitlements(&resp.entitlements, Some(&resp.plan), &app, pool.inner())
+                .await?;
             Ok(build_status(pool.inner(), &state, &resp).await)
         }
         "google" => {
@@ -158,6 +150,9 @@ pub async fn cloud_exchange_code(
             )
             .await?;
             after_login(&app, pool.inner(), &state).await?;
+            pro_state
+                .apply_from_entitlements(&resp.entitlements, Some(&resp.plan), &app, pool.inner())
+                .await?;
             Ok(build_status(pool.inner(), &state, &resp).await)
         }
         _ => Err(format!("unknown provider: {}", provider)),
@@ -168,14 +163,19 @@ pub async fn cloud_exchange_code(
 
 #[tauri::command]
 pub async fn cloud_link_provider(
+    app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
     provider: String,
     code: String,
 ) -> Result<CloudStatus, String> {
     let me = client::link(pool.inner(), &state, &provider, &code, None)
         .await
         .map_err(String::from)?;
+    pro_state
+        .apply_from_entitlements(&me.entitlements, Some(&me.plan), &app, pool.inner())
+        .await?;
     let snap = state.snapshot();
     Ok(CloudStatus {
         connected: true,
@@ -190,8 +190,10 @@ pub async fn cloud_link_provider(
 
 #[tauri::command]
 pub async fn cloud_update_profile(
+    app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
     display_name: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,
@@ -199,6 +201,9 @@ pub async fn cloud_update_profile(
     let me = client::update_profile(pool.inner(), &state, display_name, first_name, last_name)
         .await
         .map_err(String::from)?;
+    pro_state
+        .apply_from_entitlements(&me.entitlements, Some(&me.plan), &app, pool.inner())
+        .await?;
     let snap = state.snapshot();
     Ok(CloudStatus {
         connected: true,
@@ -213,13 +218,18 @@ pub async fn cloud_update_profile(
 
 #[tauri::command]
 pub async fn cloud_unlink_provider(
+    app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
     provider: String,
 ) -> Result<CloudStatus, String> {
     let me = client::unlink(pool.inner(), &state, &provider)
         .await
         .map_err(String::from)?;
+    pro_state
+        .apply_from_entitlements(&me.entitlements, Some(&me.plan), &app, pool.inner())
+        .await?;
     let snap = state.snapshot();
     Ok(CloudStatus {
         connected: true,
@@ -330,10 +340,17 @@ pub async fn cloud_logout(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
 ) -> Result<(), String> {
     if let Some(s) = app.try_state::<Scheduler>() {
         s.disable_and_clear();
     }
+    // Manager.clear runs the Pro→Free downgrade hook (soft-disabling
+    // coworkers 4+) BEFORE auth::clear wipes the SQLite cloud:* keys.
+    // Closes the bug where signing out left all coworkers visibly active
+    // because the inline transition guard in cloud_get_status keyed off
+    // a cloud:plan SQLite row that auth::clear had just deleted.
+    let _ = pro_state.clear(&app, pool.inner()).await;
     auth::clear(&state, pool.inner()).await
 }
 
@@ -342,11 +359,12 @@ pub async fn cloud_wipe_remote(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
 ) -> Result<(), String> {
     client::sync_wipe(pool.inner(), &state)
         .await
         .map_err(String::from)?;
-    cloud_logout(app, pool, state).await
+    cloud_logout(app, pool, state, pro_state).await
 }
 
 #[tauri::command]
@@ -354,12 +372,13 @@ pub async fn cloud_delete_account(
     app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
     confirmation_slug: String,
 ) -> Result<(), String> {
     client::delete_account(pool.inner(), &state, &confirmation_slug)
         .await
         .map_err(String::from)?;
-    cloud_logout(app.clone(), pool, state).await?;
+    cloud_logout(app.clone(), pool, state, pro_state).await?;
     let _ = app.emit_to("main", "cloud:account-deleted", ());
     Ok(())
 }
@@ -441,15 +460,24 @@ pub async fn cloud_open_portal(
 
 #[tauri::command]
 pub async fn cloud_ai_balance(
+    app: AppHandle,
     pool: State<'_, SqlitePool>,
     state: State<'_, AuthState>,
+    pro_state: State<'_, ProStateManager>,
 ) -> Result<CloudAiBalance, String> {
     let (token, provider) = state
         .active_token_and_provider()
         .ok_or_else(|| "not signed in".to_string())?;
-    ai_client::get_balance(pool.inner(), &token, &provider)
+    let balance = ai_client::get_balance(pool.inner(), &token, &provider)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Patch the manager so the cloud:pro-state event fires and derived
+    // cloudCredits in the frontend updates. AccountTab's refreshBalance
+    // (and any other future caller) no longer needs to set the store.
+    let _ = pro_state
+        .patch_credits_remaining(balance.remaining, &app, pool.inner())
+        .await;
+    Ok(balance)
 }
 
 #[tauri::command]

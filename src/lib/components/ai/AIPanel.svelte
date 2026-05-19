@@ -395,6 +395,11 @@
     openSettingsTab('ai');
   }
 
+  function openAccountSettings() {
+    close();
+    openSettingsTab('account');
+  }
+
   function cancelStreaming() {
     if (cleanup) {
       cleanup();
@@ -426,6 +431,45 @@
     }
   }
 
+  // Local guidance shown in the chat when the SQL tab isn't yet set up
+  // to answer a database question. Mirrors the statuses produced by
+  // gatherSqlContext(). Returned as plain markdown so the existing
+  // renderer handles emphasis/inline-code formatting consistently.
+  function sqlContextGuidance(status: string): string {
+    if (status === 'no_sql_tab') {
+      return "I need an open **SQL query tab** to know which database to work against. Click the **+** button in the tab bar (or pick a connection from the sidebar) and try again.";
+    }
+    if (status === 'no_binding') {
+      return "This SQL tab isn't bound to a connection yet. Pick one from the **connection selector** above the editor, then ask again.";
+    }
+    if (status === 'database_unselected') {
+      return "The connection is set, but no **database** is selected for this tab. Pick a database from the dropdown next to the connection name, then ask again.";
+    }
+    return "I need an open SQL query tab with a connection and database bound before I can help with queries.";
+  }
+
+  // Same idea for NoSQL. Driver-aware so Redis users see "DB index" while
+  // MongoDB users see "database". Scope is always the database (not the
+  // collection), per the agreed UX: AI works across the whole DB the
+  // active tab points at, regardless of which collection is highlighted.
+  function nosqlContextGuidance(status: string, driver?: string): string {
+    const isRedis = driver === 'redis';
+    const dbWord = isRedis ? 'DB index (0-15)' : 'database';
+    if (status === 'no_nosql_tab') {
+      return "I need an open **NoSQL tab** to know which database to work against. Double-click a collection or key prefix in the sidebar (or pick a connection) and try again.";
+    }
+    if (status === 'no_connection') {
+      return "This NoSQL tab isn't bound to a connection yet. Pick one from the **connection selector** above the editor, then ask again.";
+    }
+    if (status === 'disconnected') {
+      return "The connection bound to this tab isn't live. Click the connection in the sidebar to reconnect, then ask again.";
+    }
+    if (status === 'no_database') {
+      return `No ${dbWord} is selected in this tab. Pick one from the dropdown above the editor, then ask again.`;
+    }
+    return "I need an open NoSQL tab with a connection and database before I can help.";
+  }
+
   async function gatherContext(): Promise<ChatContext> {
     const currentMode = get(mode);
     if (currentMode === 'sql') {
@@ -452,7 +496,9 @@
     // its "api key" is the user's cloud bearer token (fetched at send time)
     // and it needs an X-Provider header so the worker can pick the right
     // JWKS to validate the token against.
-    const provider = $settings['ai_provider'] || 'claude';
+    // Default matches AIConfigSelector: Pro → 'clauge', Free → 'claude'.
+    const provider = $settings['ai_provider'] ||
+      (get(cloudPlan) === 'pro' ? 'clauge' : 'claude');
     let apiKey = $settings[`ai_api_key_${provider}`] || '';
     let extraHeaders: Record<string, string> | undefined;
     if (provider === 'clauge') {
@@ -490,6 +536,33 @@
 
     // Gather context
     const context = await gatherContext();
+
+    // Short-circuit: SQL + NoSQL chats need a bound connection + database
+    // before the LLM can answer anything useful. If the user hasn't set
+    // one up, reply locally with guidance instead of burning a Clauge AI
+    // credit (or a BYOK API call) on an unanswerable prompt. Status is
+    // computed in the mode's gather*Context() and surfaced as the
+    // `target_status` env var; NoSQL also exposes `target_driver` so we
+    // can phrase the message for Mongo vs Redis.
+    const currentChatMode = get(mode);
+    const targetStatus = context.envVars?.find(v => v.key === 'target_status')?.value;
+    if (targetStatus && targetStatus !== 'ready') {
+      let guidance: string | null = null;
+      if (currentChatMode === 'sql') {
+        guidance = sqlContextGuidance(targetStatus);
+      } else if (currentChatMode === 'nosql') {
+        const driver = context.envVars?.find(v => v.key === 'target_driver')?.value;
+        guidance = nosqlContextGuidance(targetStatus, driver);
+      }
+      if (guidance) {
+        const lastIdx = messages.length - 1;
+        messages[lastIdx].content = guidance;
+        messages[lastIdx].isStreaming = false;
+        isStreaming = false;
+        scrollToBottom();
+        return;
+      }
+    }
 
     // Build chat history for API (only role + content, exclude current streaming msg)
     const chatHistory: ChatMessage[] = messages
@@ -654,8 +727,16 @@
           let mapped: AIMessage['error'];
           if (errLower.includes('rate limit') || errLower.includes('429') || errLower.includes('too many')) {
             mapped = { type: 'rate_limit', message: 'Rate limited. Wait a moment and try again.' };
-          } else if (errLower.includes('invalid api key') || errLower.includes('401') || errLower.includes('unauthorized')) {
-            mapped = { type: 'auth', message: 'Invalid API key. Check your key in Settings.' };
+          } else if (errLower.includes('invalid api key') || errLower.includes('401') || errLower.includes('unauthorized') || errLower.includes('sign in required')) {
+            // Clauge AI has no API key — auth is the user's cloud session
+            // token, which rotates (Google id_tokens expire after ~1h). A
+            // 401 here means "session expired, refresh by signing in", not
+            // "your stored key is wrong". Different message + action.
+            if (provider === 'clauge') {
+              mapped = { type: 'cloud_auth', message: 'Your Clauge session expired. Open Settings → Account and sign in again, then retry.' };
+            } else {
+              mapped = { type: 'auth', message: 'Invalid API key. Check your key in Settings.' };
+            }
           } else if (errLower.includes('connection failed') || errLower.includes('network') || errLower.includes('timed out') || errLower.includes('timeout') || errLower.includes('econnref') || errLower.includes('dns')) {
             mapped = { type: 'generic', message: 'Network issue. Check your connection and try again.' };
           } else if (errLower.includes('500') || errLower.includes('502') || errLower.includes('503') || errLower.includes('504') || errLower.includes('service unavailable') || errLower.includes('internal server')) {
@@ -748,12 +829,12 @@
   }
 </script>
 
-<!-- Workspace + agent modes don't wire up a system prompt or tools
-     for the AI panel — opening it would render an empty, useless
-     chat. Topbar already hides the toggle button in those modes;
-     this guard makes sure stray sources (settings / persisted
+<!-- Workspace, agent, and history modes don't wire up a system prompt
+     or tools for the AI panel — opening it would render an empty,
+     useless chat. Topbar already hides the toggle button in those
+     modes; this guard makes sure stray sources (settings / persisted
      `aiPanelOpenPerMode`) can't bring the panel back. -->
-{#if $mode !== 'workspace' && $mode !== 'agent'}
+{#if $mode !== 'workspace' && $mode !== 'agent' && $mode !== 'history'}
 <aside
   class="ai-panel"
   class:open={$aiPanelOpen}
@@ -772,7 +853,6 @@
           {modeLabels[$mode]}
         </span>
       </div>
-      <AIConfigSelector />
       <div class="ai-header-right">
         {#if $mode === 'ssh'}
           <button
@@ -1004,7 +1084,13 @@
               {/each}
             {/if}
 
-            {#if msg.isStreaming && !msg.content && !msg.toolIndicator}
+            <!-- Dots are shown whenever the assistant is mid-stream and a
+                 named tool indicator isn't already up. This covers both
+                 the initial "waiting for first chunk" case AND the
+                 between-activities gaps (tool just finished, next text
+                 chunk not yet received) where the bubble would otherwise
+                 look frozen. -->
+            {#if msg.isStreaming && !msg.toolIndicator}
               <div class="typing-indicator">
                 <span class="dot"></span>
                 <span class="dot"></span>
@@ -1013,11 +1099,11 @@
             {/if}
 
             {#if msg.error}
-              <div class="ai-error-block" class:rate-limit={msg.error.type === 'rate_limit'} class:auth-error={msg.error.type === 'auth'}>
+              <div class="ai-error-block" class:rate-limit={msg.error.type === 'rate_limit'} class:auth-error={msg.error.type === 'auth' || msg.error.type === 'cloud_auth'}>
                 <div class="ai-error-icon">
                   {#if msg.error.type === 'rate_limit'}
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                  {:else if msg.error.type === 'auth'}
+                  {:else if msg.error.type === 'auth' || msg.error.type === 'cloud_auth'}
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
                   {:else}
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -1027,6 +1113,9 @@
                   <span class="ai-error-msg">{msg.error.message}</span>
                   <div class="ai-error-actions">
                     {#if msg.error.type === 'rate_limit'}
+                      <button class="ai-error-btn" onclick={retryLastMessage}>Retry</button>
+                    {:else if msg.error.type === 'cloud_auth'}
+                      <button class="ai-error-btn" onclick={openAccountSettings}>Open Account</button>
                       <button class="ai-error-btn" onclick={retryLastMessage}>Retry</button>
                     {:else if msg.error.type === 'auth'}
                       <button class="ai-error-btn" onclick={openAiSettings}>Open Settings</button>
@@ -1040,6 +1129,18 @@
           </div>
         {/if}
       {/each}
+    </div>
+
+    <!-- Footer row above the input: provider pill on the left.
+         No credits chip — live balance is still wired end-to-end (worker
+         SSE `event: balance` → Rust `clauge_ai:balance` Tauri event →
+         `cloudCredits` store) but intentionally not displayed here so
+         users don't fixate on the counter ticking down. Settings →
+         Account is the canonical place to check usage. -->
+    <div class="ai-prompt-footer">
+      <div class="ai-prompt-footer-left">
+        <AIConfigSelector />
+      </div>
     </div>
 
     <div class="ai-input-area">

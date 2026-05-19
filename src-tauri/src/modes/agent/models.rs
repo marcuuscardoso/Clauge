@@ -38,6 +38,12 @@ pub struct AgentSession {
     /// `"opencode"`. Migration 13 added the column with a default of
     /// `"claude"`, so every pre-multi-CLI row still resolves correctly.
     pub provider: String,
+    /// Per-session override for the CLI binary location. `None`/empty
+    /// = fall back to standard $PATH lookup. Set when the user has
+    /// the agent installed somewhere `find_binary` can't reach — a
+    /// non-standard prefix, an asdf/nvm shim path, or a per-project
+    /// pinned version. Migration 17 added the column.
+    pub binary_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

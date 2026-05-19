@@ -18,6 +18,11 @@ pub const SETTINGS_KEY_USER_ID: &str = "cloud:user_id";
 pub const SETTINGS_KEY_ACTIVE_PROVIDER: &str = "cloud:active_provider";
 pub const SETTINGS_KEY_HAS_SYNCED: &str = "cloud:has_synced";
 pub const SETTINGS_KEY_PLAN: &str = "cloud:plan";
+// JSON snapshots of entitlements — read at boot so the AccountTab and
+// pro-gates render the last-known values before the /api/auth/me round
+// trip lands. Wiped by `auth::clear()` along with all other `cloud:%` rows.
+pub const SETTINGS_KEY_CREDITS_SNAPSHOT: &str = "cloud:credits_snapshot";
+pub const SETTINGS_KEY_SUB_SNAPSHOT: &str = "cloud:sub_snapshot";
 
 // Per-kind last-pushed hash; key format `cloud:hash:<kind>`.
 pub fn settings_key_hash(kind: &str) -> String {

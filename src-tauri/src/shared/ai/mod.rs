@@ -183,6 +183,7 @@ pub async fn ai_chat(
     pool: State<'_, SqlitePool>,
     sql_manager: State<'_, Arc<SqlConnectionManager>>,
     nosql_connections: State<'_, NoSqlConnections>,
+    auth_state: State<'_, crate::cloud::auth::AuthState>,
     api_key: String,
     messages: Vec<ChatMessage>,
     context: ChatContext,
@@ -201,6 +202,15 @@ pub async fn ai_chat(
     let sql_mgr = sql_manager.inner().clone();
     let nosql_mgr = nosql_connections.inner().clone();
     let extra_headers = extra_headers.unwrap_or_default();
+    // Pass AuthState only for the Clauge provider — that's the only path
+    // where 401 + Google refresh-and-retry is meaningful. BYOK providers
+    // get None so the streaming client falls straight through to the
+    // normal error mapping.
+    let auth_for_stream = if provider == "clauge" {
+        Some(auth_state.inner())
+    } else {
+        None
+    };
 
     let config = match resolve_config(&provider, None) {
         Ok(cfg) => cfg,
@@ -225,7 +235,7 @@ pub async fn ai_chat(
             clients::openai::stream_openai(
                 &client, &app, pool.inner(), &api_key, conversation_msgs,
                 &context, &session_id, &system_prompt, &tools, config, &sql_mgr, &nosql_mgr,
-                &extra_headers,
+                &extra_headers, auth_for_stream,
             )
             .await
         }

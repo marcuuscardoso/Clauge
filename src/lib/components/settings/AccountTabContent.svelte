@@ -139,41 +139,18 @@
         try {
             const s = await cloudGetStatus();
             if (s.user) {
-                setConnected(s.user, s.providers, s.activeProvider, s.plan);
+                // Identity-side stores only — entitlements (plan, credits,
+                // subscription) are owned by Rust's ProStateManager. The
+                // cloud_get_status command applies them server-side and emits
+                // cloud:pro-state, which the layout's subscription pipes
+                // into proState → derived cloudPlan / cloudCredits / cloudSub.
+                setConnected(s.user, s.providers, s.activeProvider);
                 setLastSyncedForKinds(s.lastSynced);
-                applyEntitlements(s.entitlements);
             }
         } catch (e) {
             showToast(friendlyError(e), "error");
         } finally {
             refreshing = false;
-        }
-    }
-
-    // /api/auth/me always includes entitlements. Mirror credits + sub into
-    // the global stores so the subscription card + AI panel chip always
-    // reflect the latest server state.
-    function applyEntitlements(ent: import("$lib/commands/cloud").CloudEntitlements | undefined) {
-        if (!ent) return;
-        if (ent.credits) {
-            cloudCredits.set({
-                remaining: ent.credits.remaining,
-                allowance: ent.credits.allowance,
-                resetsAt: ent.credits.resets_at,
-            });
-        }
-        if (ent.subscription) {
-            cloudSub.set({
-                status: ent.subscription.status,
-                cancelAtPeriodEnd: ent.subscription.cancel_at_period_end,
-                isLifetime: ent.subscription.is_lifetime === true,
-                currentPeriodEnd: ent.subscription.current_period_end ?? null,
-                currentPeriodStart: ent.subscription.current_period_start ?? null,
-                interval: ent.subscription.interval ?? null,
-                priceUsd: ent.subscription.price_usd ?? null,
-            });
-        } else {
-            cloudSub.set(null);
         }
     }
 
@@ -401,16 +378,11 @@
     let balanceLoadedFor = $state<string | null>(null);
     async function refreshBalance() {
         try {
-            const b = await invoke<{
-                remaining: number;
-                allowance: number;
-                resetsAt: string | null;
-            }>("cloud_ai_balance");
-            cloudCredits.set({
-                remaining: b.remaining,
-                allowance: b.allowance,
-                resetsAt: b.resetsAt,
-            });
+            // The Rust `cloud_ai_balance` command patches the ProStateManager
+            // with the fresh remaining/allowance, which emits cloud:pro-state
+            // → updates derived cloudCredits reactively. We just fire and
+            // forget; the response is consumed for error detection only.
+            await invoke("cloud_ai_balance");
         } catch {
             /* silent — strip falls back to plan affirmation only */
         }
@@ -800,10 +772,15 @@
                      Free users get a compact upsell variant of just row 1. -->
                 <section class="acc-sub-card">
                     {#if $cloudPlan === "pro"}
-                        {@const periodEnd =
-                            $cloudSub?.currentPeriodEnd ??
-                            $cloudCredits?.resetsAt ??
-                            null}
+                        {@const interval = $cloudSub?.interval ?? null}
+                        {@const isLifetime = $cloudSub?.isLifetime === true || interval === "lifetime"}
+                        {@const periodEnd = isLifetime
+                            ? null
+                            : ($cloudSub?.currentPeriodEnd ??
+                              $cloudCredits?.resetsAt ??
+                              null)}
+                        {@const periodStart =
+                            $cloudSub?.currentPeriodStart ?? null}
                         {@const used = $cloudCredits
                             ? Math.max(
                                   0,
@@ -825,9 +802,7 @@
                                   ),
                               )
                             : 0}
-                        {@const interval = $cloudSub?.interval ?? null}
                         {@const cancelling = $cloudSub?.cancelAtPeriodEnd === true}
-                        {@const isLifetime = $cloudSub?.isLifetime === true || interval === "lifetime"}
 
                         <!-- Row 1: header -->
                         <header class="acc-sub-head">
@@ -860,7 +835,7 @@
                                         {#if isLifetime}
                                             One-time purchase
                                             <span class="acc-sub-dot">·</span>
-                                            refills {fmtAbsDate(periodEnd)}
+                                            no renewal
                                         {:else}
                                             {#if interval}Billed {interval}
                                                 <span class="acc-sub-dot">·</span>
@@ -943,8 +918,14 @@
                                         : "Pro"}
                                 </strong>
                                 {#if $cloudSub?.priceUsd && interval}
+                                    {@const priceUnit =
+                                        interval === "lifetime"
+                                            ? "once"
+                                            : interval === "yearly"
+                                              ? "/ year"
+                                              : "/ month"}
                                     <span class="acc-sub-meta-sub">
-                                        ${$cloudSub.priceUsd}{#if interval === "lifetime"} once{:else if interval === "yearly"} / year{:else} / month{/if}
+                                        ${$cloudSub.priceUsd} {priceUnit}
                                     </span>
                                 {:else}
                                     <span class="acc-sub-meta-sub"
@@ -952,11 +933,11 @@
                                     >
                                 {/if}
                             </div>
-                            {#if periodEnd && renewalDays !== null}
+                            {#if isLifetime ? periodStart : (periodEnd && renewalDays !== null)}
                                 <div class="acc-sub-meta-col">
                                     <span class="acc-sub-meta-label">
                                         {#if isLifetime}
-                                            NEXT REFILL
+                                            PURCHASED
                                         {:else if cancelling}
                                             ENDS
                                         {:else}
@@ -964,11 +945,15 @@
                                         {/if}
                                     </span>
                                     <strong class="acc-sub-meta-val"
-                                        >{fmtAbsDate(periodEnd)}</strong
+                                        >{fmtAbsDate(isLifetime ? periodStart : periodEnd)}</strong
                                     >
-                                    <span class="acc-sub-meta-sub"
-                                        >{fmtDaysCount(renewalDays)}</span
-                                    >
+                                    <span class="acc-sub-meta-sub">
+                                        {#if isLifetime}
+                                            {fmtRelativeSince(periodStart)}
+                                        {:else}
+                                            {fmtDaysCount(renewalDays!)}
+                                        {/if}
+                                    </span>
                                 </div>
                             {/if}
                             {#if $cloudUser?.createdAt}

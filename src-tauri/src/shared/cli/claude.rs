@@ -48,7 +48,15 @@ impl CliRunner for ClaudeRunner {
     }
 
     fn build_spawn_command(&self, opts: &SpawnOpts) -> String {
-        let mut cmd = String::from(BINARY);
+        // Per-session override (Custom binary path in the modal's Advanced
+        // section) takes precedence over the bare binary name; the shell
+        // would otherwise resolve "claude" via $PATH only.
+        let head = opts.binary_path_override.as_deref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(crate::shared::cli::runner::shell_quote_path)
+            .unwrap_or_else(|| BINARY.to_string());
+        let mut cmd = head;
         if let Some(ref sid) = opts.resume_session_id {
             cmd.push_str(&format!(" --resume \"{}\"", sid));
         }
@@ -124,7 +132,17 @@ impl CliRunner for ClaudeRunner {
     }
 
     fn session_dir_for_project(&self, project_path: &str) -> Option<PathBuf> {
-        let encoded = project_path.replace('/', "-").replace('.', "-");
+        // Claude CLI flattens ANY character that isn't [A-Za-z0-9-] to a
+        // single `-` (no run-collapsing — each special char becomes one
+        // dash, so "/.foo" produces "--foo"). Earlier versions of this
+        // encoder only handled "/" and ".", which silently failed for
+        // paths containing spaces, underscores, or other punctuation;
+        // the Custom-purpose picker would return empty for those paths.
+        // Verified against a live `~/.claude/projects/` against 30 cwds.
+        let encoded: String = project_path
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+            .collect();
         self.sessions_root().map(|r| r.join(encoded))
     }
 

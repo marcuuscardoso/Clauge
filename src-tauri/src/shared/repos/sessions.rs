@@ -123,9 +123,10 @@ pub async fn insert_session(
     created_at: &str,
     last_used_at: &str,
     provider: &str,
+    binary_path: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO agent_sessions (id, title, purpose, project_path, project_name, context_prompt, skip_permissions, git_name, git_email, created_at, last_used_at, provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_sessions (id, title, purpose, project_path, project_name, context_prompt, skip_permissions, git_name, git_email, created_at, last_used_at, provider, binary_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
     .bind(title)
@@ -139,8 +140,24 @@ pub async fn insert_session(
     .bind(created_at)
     .bind(last_used_at)
     .bind(provider)
+    .bind(binary_path)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Set or clear the per-session binary override. Pass `None`/empty to
+/// restore the default $PATH lookup behaviour.
+pub async fn update_session_binary_path(
+    pool: &SqlitePool,
+    id: &str,
+    binary_path: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE agent_sessions SET binary_path = ? WHERE id = ?")
+        .bind(binary_path)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

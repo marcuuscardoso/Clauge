@@ -472,9 +472,16 @@ pub async fn execute_sql_tool(
                     .await
                 }
                 DatabasePool::MySql(p) => {
-                    sqlx::query_as::<_, (String,)>("SHOW DATABASES")
-                        .fetch_all(p)
-                        .await
+                    // VARCHAR vs VARBINARY return type differs per MySQL
+                    // server charset — use the helper that handles both.
+                    match sqlx::query("SHOW DATABASES").fetch_all(p).await {
+                        Ok(rows) => Ok(rows
+                            .iter()
+                            .map(|row| (crate::modes::sql::client::mysql_decode_string(row, 0),))
+                            .filter(|(s,)| !s.is_empty())
+                            .collect()),
+                        Err(e) => Err(e),
+                    }
                 }
                 DatabasePool::Sqlite(_) => {
                     Ok(vec![("main".to_string(),)])

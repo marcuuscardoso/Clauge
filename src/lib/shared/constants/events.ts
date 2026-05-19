@@ -82,4 +82,9 @@ export const APP_EVENT = {
   /** Detail: `{ provider: 'github' | 'google'; code: string }`.
    *  The receiver calls `cloudExchangeCode(provider, code)`. */
   OAUTH_CALLBACK: 'clauge:oauth-callback',
+  /** Fired by Cmd/Ctrl+T (and any other "new tab" shortcut). Topbar
+   *  listens and invokes the same handler the "+" button uses, so per-mode
+   *  behaviour (SSH/Agent/Workspace pickers, SQL script prompt, blank
+   *  REST/NoSQL tab, etc.) stays in one place. */
+  NEW_TAB: 'clauge:new-tab',
 } as const;

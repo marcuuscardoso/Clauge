@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::AsyncBufReadExt;
 use tokio_stream::StreamExt;
 
+use crate::cloud::auth::AuthState;
 use crate::modes::sql::client::SqlConnectionManager;
 use crate::modes::nosql::client::NoSqlConnections;
 use crate::shared::ai::context::truncate_str;
@@ -29,7 +30,18 @@ pub async fn stream_openai(
     // provider to send `X-Provider: github|google` so our worker can
     // validate the bearer against the right JWKS.
     extra_headers: &std::collections::HashMap<String, String>,
+    // Auth state — only meaningful for the Clauge AI provider, where it
+    // enables auto-refresh of the Google id_token on 401 so a stale
+    // session doesn't surface as a user-facing "sign in again" error.
+    // `None` for BYOK providers (no refresh path).
+    auth_state: Option<&AuthState>,
 ) -> Result<(), String> {
+    let mut api_key = api_key.to_string();
+    // We only attempt the Clauge AI refresh+retry dance once per chat to
+    // avoid loops: if refresh succeeds but the new token also 401s,
+    // something is genuinely wrong (provider revoked, JWKS mismatch, etc.)
+    // and the user has to re-sign-in.
+    let mut clauge_refresh_attempted = false;
     let mut total_input_tokens: u64 = 0;
     let mut total_output_tokens: u64 = 0;
 
@@ -176,6 +188,46 @@ pub async fn stream_openai(
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
+
+            // Clauge AI auto-refresh on 401: the user's cloud bearer is a
+            // Google id_token (or GitHub token) and Google id_tokens rotate
+            // every ~1 hour. Catch the first 401 of a chat, refresh the
+            // token via `/api/auth/google/refresh`, swap in the new bearer,
+            // and retry the same request. Mirrors `with_google_refresh_retry`
+            // in cloud/client.rs but at the streaming-request level here.
+            // For GitHub or non-Clauge providers there's no refresh path,
+            // so we fall through to the normal error mapping.
+            if status == 401
+                && matches!(
+                    config.provider_id,
+                    crate::shared::ai::providers::ProviderId::Clauge
+                )
+                && !clauge_refresh_attempted
+                && auth_state.is_some()
+            {
+                clauge_refresh_attempted = true;
+                let state = auth_state.unwrap();
+                log::info!("[AI Clauge] 401 received — attempting Google token refresh");
+                // Try the refresh BEFORE we consume the response body. If the
+                // refresh succeeds we drain + drop the response and continue
+                // the outer loop with the new bearer; if it fails we leave
+                // `response` intact so the normal error-mapping path can
+                // read its body / headers below.
+                if crate::cloud::auth::refresh_google_and_store(state, pool)
+                    .await
+                    .is_ok()
+                {
+                    if let Some((new_tok, _)) = state.active_token_and_provider() {
+                        api_key = new_tok;
+                        // Drain the response so the connection can be reused.
+                        let _ = response.bytes().await;
+                        log::info!("[AI Clauge] refresh succeeded — retrying the request");
+                        continue;
+                    }
+                }
+                log::warn!("[AI Clauge] token refresh failed — surfacing 401 to caller");
+            }
+
             let retry_after = response.headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
@@ -284,14 +336,20 @@ pub async fn stream_openai(
             }
 
             // Clauge-AI-worker-specific: live credit balance after each chat.
-            // Forward to the same store the cloud_ai_balance command writes to.
+            // Patch ProStateManager directly — it persists the snapshot and
+            // emits cloud:pro-state, which the frontend's proState
+            // subscription consumes. Replaces the legacy clauge_ai:balance
+            // event so there's exactly one event surface for credit updates.
             if current_event.as_deref() == Some("balance") {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(remaining) = parsed.get("remaining").and_then(|v| v.as_i64()) {
-                        let _ = app.emit(
-                            "clauge_ai:balance",
-                            serde_json::json!({"remaining": remaining}),
-                        );
+                        if let Some(manager) =
+                            app.try_state::<crate::cloud::pro_state::ProStateManager>()
+                        {
+                            let _ = manager
+                                .patch_credits_remaining(remaining, app, pool)
+                                .await;
+                        }
                     }
                 }
                 current_event = None;

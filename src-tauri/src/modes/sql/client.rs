@@ -1,6 +1,7 @@
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
-use sqlx::{Column, Row, TypeInfo};
+use sqlx::{Column, Either, Row, TypeInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,6 +33,56 @@ pub struct SqlConnectionConfig {
     pub ssh_profile_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryKind {
+    /// Returns rows (SELECT, SHOW, EXPLAIN, WITH, PRAGMA, VALUES, …).
+    Select,
+    /// Side-effect query (INSERT, UPDATE, DELETE, MERGE, TRUNCATE, …).
+    Dml,
+    /// Schema / session statement (CREATE, DROP, ALTER, SET, BEGIN, …).
+    Ddl,
+    /// First verb didn't match anything we know. Treated like SELECT so we
+    /// still try to fetch rows; the driver decides what comes back.
+    Unknown,
+}
+
+/// Classify a query by its leading verb. Strips `--` line comments and
+/// `/* … */` block comments before reading the first word. Used to decide
+/// whether to call `fetch_all` (rows path) or `execute` (rows_affected path)
+/// — sqlx's `fetch_all` reports 0 affected for DML, so DML/DDL must take
+/// the execute path or the result-card lies to the user.
+pub fn classify_query(q: &str) -> QueryKind {
+    let mut s = q.trim_start();
+    loop {
+        if let Some(rest) = s.strip_prefix("--") {
+            let end = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
+            s = rest[end..].trim_start();
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix("/*") {
+            if let Some(close) = rest.find("*/") {
+                s = rest[close + 2..].trim_start();
+                continue;
+            }
+            break;
+        }
+        break;
+    }
+    let first = s.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    match first.as_str() {
+        "SELECT" | "WITH" | "SHOW" | "EXPLAIN" | "DESCRIBE" | "DESC"
+        | "VALUES" | "PRAGMA" | "TABLE" => QueryKind::Select,
+        "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" | "CALL"
+        | "TRUNCATE" | "COPY" => QueryKind::Dml,
+        "CREATE" | "DROP" | "ALTER" | "RENAME" | "GRANT" | "REVOKE"
+        | "COMMENT" | "USE" | "SET" | "BEGIN" | "COMMIT" | "ROLLBACK"
+        | "SAVEPOINT" | "RELEASE" | "VACUUM" | "ANALYZE" | "CLUSTER"
+        | "REINDEX" | "ATTACH" | "DETACH" => QueryKind::Ddl,
+        _ => QueryKind::Unknown,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SqlQueryResult {
@@ -39,6 +90,7 @@ pub struct SqlQueryResult {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub duration_ms: u64,
+    pub query_kind: QueryKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -576,6 +628,21 @@ fn pg_row_to_json(row: &sqlx::postgres::PgRow) -> Vec<serde_json::Value> {
         .collect()
 }
 
+// MySQL's information_schema and SHOW commands can return name columns as
+// either VARCHAR or VARBINARY depending on the server's character set and
+// collation settings (e.g. utf8mb4_bin or lower_case_table_names=0). Decode
+// as String first; if the column came back binary, fall back to bytes and
+// lossy-convert. Never panics, never bubbles a decoding error to the user.
+pub fn mysql_decode_string(row: &sqlx::mysql::MySqlRow, idx: usize) -> String {
+    if let Ok(s) = row.try_get::<String, _>(idx) {
+        return s;
+    }
+    if let Ok(bytes) = row.try_get::<Vec<u8>, _>(idx) {
+        return String::from_utf8_lossy(&bytes).into_owned();
+    }
+    String::new()
+}
+
 fn mysql_row_to_json(row: &sqlx::mysql::MySqlRow) -> Vec<serde_json::Value> {
     let columns = row.columns();
     columns
@@ -640,12 +707,26 @@ async fn load_saved_config(
         .await
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or_else(|| format!("Saved connection '{}' not found", conn_id))?;
+
+    // For Postgres/MySQL/ClickHouse one connection profile can address many
+    // databases on the same server, so the tree node's database name is the
+    // authoritative target. For SQLite the saved `database` is the file path
+    // (and SQLite only has one logical database per file — "main"); for D1
+    // it's the immutable database UUID. Overriding either with the synthetic
+    // tree name ("main") points the pool at the wrong file/database, so we
+    // keep the saved value for those drivers.
+    let driver_lc = saved.driver.to_lowercase();
+    let database = match driver_lc.as_str() {
+        "sqlite" | "d1" => saved.database_name.clone(),
+        _ => database_override.to_string(),
+    };
+
     Ok(SqlConnectionConfig {
         name: saved.name,
         driver: saved.driver,
         host: saved.host,
         port: saved.port as u16,
-        database: database_override.to_string(),
+        database,
         username: saved.username,
         password: saved.password,
         ssl: saved.ssl == 1,
@@ -814,35 +895,67 @@ pub async fn sql_test_connection(
 /// by dialect; no in-flight bookkeeping. Postgres + MySQL receive a
 /// `PoolConnection` so the caller can attach `pg_cancel_backend(pid)` /
 /// `KILL QUERY conn_id` on the same physical connection.
+/// Derive a UI hint for which result panel to show, using empirical signals
+/// first and the verb classifier only as a last-resort tie-breaker.
+///
+/// Empirical wins because it catches the cases hardcoded verb lists miss —
+/// CTE-led DML (`WITH … INSERT …`), `INSERT … RETURNING *`, stored procs,
+/// vendor-specific verbs, etc. The verb fallback only fires for "nothing
+/// came back" results where we genuinely can't tell empty-SELECT from DDL.
+fn infer_query_kind(query: &str, rows_len: usize, columns_len: usize, affected: u64) -> QueryKind {
+    if rows_len > 0 {
+        return QueryKind::Select;
+    }
+    if affected > 0 {
+        return QueryKind::Dml;
+    }
+    if columns_len > 0 {
+        // No rows + no affected + columns known → empty SELECT result set.
+        return QueryKind::Select;
+    }
+    // Nothing came back. Fall back to the verb hint to disambiguate
+    // empty-SELECT (describe failed) from DDL.
+    classify_query(query)
+}
+
 async fn run_query_pg(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
     query: &str,
 ) -> Result<SqlQueryResult, String> {
     let start = Instant::now();
-    let rows = sqlx::query(query)
-        .fetch_all(&mut **conn)
-        .await
-        .map_err(|e| e.to_string())?;
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let columns: Vec<String> = if rows.is_empty() {
+    let mut json_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut columns: Vec<String> = Vec::new();
+    let mut affected: u64 = 0;
+    {
+        let mut stream = sqlx::query(query).fetch_many(&mut **conn);
+        while let Some(step) = stream.try_next().await.map_err(|e| e.to_string())? {
+            match step {
+                Either::Left(qr) => affected += qr.rows_affected(),
+                Either::Right(row) => {
+                    if columns.is_empty() {
+                        columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                    }
+                    json_rows.push(pg_row_to_json(&row));
+                }
+            }
+        }
+    }
+    // If nothing came back at all, try describe() to recover column names —
+    // happens for `SELECT … WHERE 1=0`-style empty result sets.
+    if json_rows.is_empty() && columns.is_empty() {
         use sqlx::Executor;
-        // describe() needs a `&mut *Connection`; PG describe doesn't need
-        // a live cursor so an empty result here just yields no columns.
-        (&mut **conn)
-            .describe(query)
-            .await
-            .map(|d| d.columns.iter().map(|c| c.name().to_string()).collect())
-            .unwrap_or_default()
-    } else {
-        rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect()
-    };
-    let json_rows: Vec<Vec<serde_json::Value>> = rows.iter().map(pg_row_to_json).collect();
-    let affected = json_rows.len() as u64;
-    Ok(SqlQueryResult { columns, rows: json_rows, affected_rows: affected, duration_ms })
+        if let Ok(d) = (&mut **conn).describe(query).await {
+            columns = d.columns.iter().map(|c| c.name().to_string()).collect();
+        }
+    }
+    let kind = infer_query_kind(query, json_rows.len(), columns.len(), affected);
+    Ok(SqlQueryResult {
+        columns,
+        rows: json_rows,
+        affected_rows: affected,
+        duration_ms: start.elapsed().as_millis() as u64,
+        query_kind: kind,
+    })
 }
 
 async fn run_query_mysql(
@@ -850,28 +963,37 @@ async fn run_query_mysql(
     query: &str,
 ) -> Result<SqlQueryResult, String> {
     let start = Instant::now();
-    let rows = sqlx::query(query)
-        .fetch_all(&mut **conn)
-        .await
-        .map_err(|e| e.to_string())?;
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let columns: Vec<String> = if rows.is_empty() {
+    let mut json_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut columns: Vec<String> = Vec::new();
+    let mut affected: u64 = 0;
+    {
+        let mut stream = sqlx::query(query).fetch_many(&mut **conn);
+        while let Some(step) = stream.try_next().await.map_err(|e| e.to_string())? {
+            match step {
+                Either::Left(qr) => affected += qr.rows_affected(),
+                Either::Right(row) => {
+                    if columns.is_empty() {
+                        columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                    }
+                    json_rows.push(mysql_row_to_json(&row));
+                }
+            }
+        }
+    }
+    if json_rows.is_empty() && columns.is_empty() {
         use sqlx::Executor;
-        (&mut **conn)
-            .describe(query)
-            .await
-            .map(|d| d.columns.iter().map(|c| c.name().to_string()).collect())
-            .unwrap_or_default()
-    } else {
-        rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect()
-    };
-    let json_rows: Vec<Vec<serde_json::Value>> = rows.iter().map(mysql_row_to_json).collect();
-    let affected = json_rows.len() as u64;
-    Ok(SqlQueryResult { columns, rows: json_rows, affected_rows: affected, duration_ms })
+        if let Ok(d) = (&mut **conn).describe(query).await {
+            columns = d.columns.iter().map(|c| c.name().to_string()).collect();
+        }
+    }
+    let kind = infer_query_kind(query, json_rows.len(), columns.len(), affected);
+    Ok(SqlQueryResult {
+        columns,
+        rows: json_rows,
+        affected_rows: affected,
+        duration_ms: start.elapsed().as_millis() as u64,
+        query_kind: kind,
+    })
 }
 
 async fn run_query_sqlite(
@@ -879,27 +1001,35 @@ async fn run_query_sqlite(
     query: &str,
 ) -> Result<SqlQueryResult, String> {
     let start = Instant::now();
-    let rows = sqlx::query(query)
-        .fetch_all(p)
-        .await
-        .map_err(|e| e.to_string())?;
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let columns: Vec<String> = if rows.is_empty() {
+    let mut stream = sqlx::query(query).fetch_many(p);
+    let mut json_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut columns: Vec<String> = Vec::new();
+    let mut affected: u64 = 0;
+    while let Some(step) = stream.try_next().await.map_err(|e| e.to_string())? {
+        match step {
+            Either::Left(qr) => affected += qr.rows_affected(),
+            Either::Right(row) => {
+                if columns.is_empty() {
+                    columns = row.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                json_rows.push(sqlite_row_to_json(&row));
+            }
+        }
+    }
+    if json_rows.is_empty() && columns.is_empty() {
         use sqlx::Executor;
-        p.describe(query)
-            .await
-            .map(|d| d.columns.iter().map(|c| c.name().to_string()).collect())
-            .unwrap_or_default()
-    } else {
-        rows[0]
-            .columns()
-            .iter()
-            .map(|c| c.name().to_string())
-            .collect()
-    };
-    let json_rows: Vec<Vec<serde_json::Value>> = rows.iter().map(sqlite_row_to_json).collect();
-    let affected = json_rows.len() as u64;
-    Ok(SqlQueryResult { columns, rows: json_rows, affected_rows: affected, duration_ms })
+        if let Ok(d) = p.describe(query).await {
+            columns = d.columns.iter().map(|c| c.name().to_string()).collect();
+        }
+    }
+    let kind = infer_query_kind(query, json_rows.len(), columns.len(), affected);
+    Ok(SqlQueryResult {
+        columns,
+        rows: json_rows,
+        affected_rows: affected,
+        duration_ms: start.elapsed().as_millis() as u64,
+        query_kind: kind,
+    })
 }
 
 #[tauri::command]
@@ -1046,6 +1176,7 @@ async fn execute_once(
                 rows: result.rows,
                 affected_rows: result.affected,
                 duration_ms: start.elapsed().as_millis() as u64,
+                query_kind: classify_query(query),
             })
         }
         DatabasePool::D1(c) => {
@@ -1076,6 +1207,7 @@ async fn execute_once(
                     rows: result.rows,
                     affected_rows: result.affected,
                     duration_ms,
+                    query_kind: classify_query(query),
                 }
             })
         }
@@ -1111,11 +1243,15 @@ pub async fn sql_list_databases(
             Ok(rows.into_iter().map(|r| r.0).collect())
         }
         DatabasePool::MySql(p) => {
-            let rows = sqlx::query_as::<_, (String,)>("SHOW DATABASES")
+            let rows = sqlx::query("SHOW DATABASES")
                 .fetch_all(p)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(rows.into_iter().map(|r| r.0).collect())
+            Ok(rows
+                .iter()
+                .map(|row| mysql_decode_string(row, 0))
+                .filter(|s| !s.is_empty())
+                .collect())
         }
         DatabasePool::Sqlite(_) => {
             // SQLite has only one database per file
@@ -1295,14 +1431,16 @@ pub async fn sql_list_tables(
                     db.replace('\'', "''")
                 )
             };
-            let rows = sqlx::query_as::<_, (String, String)>(&query)
+            let rows = sqlx::query(&query)
                 .fetch_all(p)
                 .await
                 .map_err(|e| e.to_string())?;
 
             Ok(rows
-                .into_iter()
-                .map(|(name, table_type)| {
+                .iter()
+                .map(|row| {
+                    let name = mysql_decode_string(row, 0);
+                    let table_type = mysql_decode_string(row, 1);
                     let tt = if table_type == "BASE TABLE" {
                         "TABLE".to_string()
                     } else {
@@ -1450,21 +1588,10 @@ pub async fn sql_describe_table(
                 .collect())
         }
         DatabasePool::MySql(p) => {
-            #[derive(sqlx::FromRow)]
-            struct MysqlColumnInfo {
-                #[sqlx(rename = "Field")]
-                field: String,
-                #[sqlx(rename = "Type")]
-                col_type: String,
-                #[sqlx(rename = "Null")]
-                nullable: String,
-                #[sqlx(rename = "Key")]
-                key: String,
-                #[sqlx(rename = "Default")]
-                default: Option<String>,
-            }
-
-            let rows = sqlx::query_as::<_, MysqlColumnInfo>(&format!(
+            // DESCRIBE returns Field/Type/Null/Key/Default. Any of these can
+            // come back VARBINARY under some collations (e.g. *_bin), so
+            // decode each by ordinal with the shared helper.
+            let rows = sqlx::query(&format!(
                 "DESCRIBE `{}`",
                 table.replace('`', "``")
             ))
@@ -1473,13 +1600,30 @@ pub async fn sql_describe_table(
             .map_err(|e| e.to_string())?;
 
             Ok(rows
-                .into_iter()
-                .map(|r| ColumnInfo {
-                    name: r.field,
-                    data_type: r.col_type,
-                    is_nullable: r.nullable == "YES",
-                    is_primary_key: r.key == "PRI",
-                    default_value: r.default,
+                .iter()
+                .map(|row| {
+                    let field = mysql_decode_string(row, 0);
+                    let col_type = mysql_decode_string(row, 1);
+                    let nullable = mysql_decode_string(row, 2);
+                    let key = mysql_decode_string(row, 3);
+                    // Column 4 ("Default") is nullable — try String, then bytes, then None.
+                    let default: Option<String> = row
+                        .try_get::<Option<String>, _>(4)
+                        .ok()
+                        .flatten()
+                        .or_else(|| {
+                            row.try_get::<Option<Vec<u8>>, _>(4)
+                                .ok()
+                                .flatten()
+                                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        });
+                    ColumnInfo {
+                        name: field,
+                        data_type: col_type,
+                        is_nullable: nullable == "YES",
+                        is_primary_key: key == "PRI",
+                        default_value: default,
+                    }
                 })
                 .collect())
         }
@@ -1687,6 +1831,7 @@ pub async fn sql_delete_saved_connection(
 #[tauri::command]
 pub async fn sql_update_saved_connection(
     pool: State<'_, SqlitePool>,
+    manager: State<'_, Arc<SqlConnectionManager>>,
     id: String,
     config: SqlConnectionConfig,
 ) -> Result<SqlSavedConnection, String> {
@@ -1706,6 +1851,30 @@ pub async fn sql_update_saved_connection(
     )
     .await
     .map_err(|e| e.to_string())?;
+
+    // Drop any cached pools / tunnels for this connection. The pool was
+    // built against the previous host/port/file/credentials, so reusing it
+    // after an edit silently points at the old target (most visible with
+    // SQLite, where the saved `database` is the actual file path). Closing
+    // pools here forces the next request to rebuild against the new config.
+    let prefix = format!("{}:", id);
+    let drained: Vec<(String, DatabasePool)> = {
+        let mut conns = manager.connections.lock().await;
+        let keys: Vec<String> = conns
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|k| conns.remove(&k).map(|p| (k, p)))
+            .collect()
+    };
+    for (key, db_pool) in drained {
+        close_db_pool(db_pool).await;
+        let _ = manager.tunnels.lock().await.remove(&key);
+        let _ = manager.permits.lock().await.remove(&key);
+        log::info!("[Clauge SQL] pool dropped on config update: {}", key);
+    }
 
     crate::cloud::scheduler::bump("sql");
 

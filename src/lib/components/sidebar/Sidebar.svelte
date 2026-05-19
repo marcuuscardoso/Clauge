@@ -24,7 +24,7 @@
   import { checkAndDownloadUpdate, showWhatsNewModal, whatsNewContent, updateAvailable } from '$lib/utils/updater';
   import { showToast } from '$lib/shared/primitives/toast';
   import { FULLSCREEN_POLL_INTERVAL_MS } from '$lib/shared/constants/timings';
-  import { tabs, activeTabId, openSettingsTab } from '$lib/shared/stores/tabs';
+  import { tabs, activeTabId, openSettingsTab, lastActiveTabPerMode } from '$lib/shared/stores/tabs';
   import { get } from 'svelte/store';
   import { activateTabAcrossMode } from '$lib/utils/tabActivation';
 
@@ -72,15 +72,26 @@
     realignActiveTabToMode(m);
   }
 
-  // After a mode switch, if the currently active tab belongs to a different
-  // mode, activate the most recent tab of the new mode so the highlighted
-  // tab matches the visible panel. Required for AI panel context and
-  // terminal/session-coupled UI to stay coherent.
+  // After a mode switch, if the currently active tab belongs to a
+  // different mode, restore the user's last-active tab IN THE NEW MODE
+  // so flipping Agent → REST → Agent returns to the exact tab they
+  // were on, not just any tab of that mode. Falls back to creation
+  // order for the very first switch to a mode (no memory yet) or when
+  // the memorized tab has since been closed.
   function realignActiveTabToMode(m: AppMode) {
     const currentActiveId = get(activeTabId);
     const allTabs = get(tabs);
     const currentTab = allTabs.find((t) => t.id === currentActiveId);
     if (currentTab && currentTab.mode === m) return;
+
+    // First preference: the memorized tab for this mode.
+    const memorized = get(lastActiveTabPerMode).get(m);
+    if (memorized !== undefined && allTabs.some((t) => t.id === memorized)) {
+      activateTabAcrossMode(memorized);
+      return;
+    }
+
+    // Fall back: most-recently-created tab of this mode.
     const newModeTabs = allTabs.filter((t) => t.mode === m);
     if (newModeTabs.length > 0) {
       activateTabAcrossMode(newModeTabs[newModeTabs.length - 1].id);

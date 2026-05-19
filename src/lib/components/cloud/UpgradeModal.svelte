@@ -4,7 +4,7 @@
     import { openSettingsTab } from "$lib/shared/stores/tabs";
 
     type Discount = { percent: number; code: string | null };
-    type Plan = { id: string; price_usd: number; discount: Discount | null };
+    type Plan = { id: string; price_usd: number; credits?: number; discount: Discount | null };
     type Pricing = { schema_version: number; plans: Plan[] };
 
     let pricing = $state<Pricing | null>(null);
@@ -164,10 +164,21 @@
 
     // Plan-specific credit copy for the feature grid. Only credits differ
     // between plans — Managed AI / coworkers / themes are identical.
+    // Number sourced from billing_pricing.credits via the live pricing API
+    // so operator-tuned grants flow through without a release. Inline
+    // numbers are the offline / pre-fetch fallback.
     function creditsCopy(id: string): string {
-        if (id === "yearly") return "12,000 credits / year";
-        if (id === "lifetime") return "20,000 credits / year, forever";
-        return "1,000 credits / month";
+        const live = pricing?.plans.find((p) => p.id === id)?.credits;
+        const fmt = (n: number) => n.toLocaleString();
+        if (id === "yearly") {
+            return `${fmt(live ?? 12000)} credits / year`;
+        }
+        if (id === "lifetime") {
+            // Lifetime is a one-time grant — NOT a yearly refill. Copy must
+            // never imply otherwise.
+            return `${fmt(live ?? 20000)} credits, one-time`;
+        }
+        return `${fmt(live ?? 1000)} credits / month`;
     }
 </script>
 
