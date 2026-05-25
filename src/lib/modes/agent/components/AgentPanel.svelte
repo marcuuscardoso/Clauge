@@ -851,7 +851,7 @@
       // own encoded Claude dir → exactly one session file in there →
       // capture is unambiguous and resume after restart always finds
       // the right file. Title is kept as a readable suffix.
-      if (!session.worktreePath && !session.claudeSessionId) {
+      if (!session.worktreePath && !session.claudeSessionId && !session.noWorktree) {
         try {
           const isGit = await agentIsGitRepo(session.projectPath);
           if (isGit) {

@@ -62,6 +62,7 @@
   // has the CLI on $PATH and shouldn't see this. When enabled, the
   // value is forwarded to the new session row's `binary_path` column;
   // empty string is treated as "not set" (falls back to $PATH).
+  let useWorktree = $state(true);
   let useCustomBinary = $state(false);
   let customBinaryPath = $state('');
   let binaryProbeResult = $state<{ kind: 'idle' | 'ok' | 'err' | 'probing'; msg: string }>({ kind: 'idle', msg: '' });
@@ -204,6 +205,7 @@
         binaryPath: useCustomBinary && customBinaryPath.trim()
           ? customBinaryPath.trim()
           : undefined,
+        noWorktree: !useWorktree || undefined,
       });
 
       // Link resumed Claude session if selected
@@ -247,7 +249,7 @@
     customPrompt = ''; gitEnabled = false; gitName = ''; gitEmail = '';
     discoveredSessions = []; selectedSessionId = '';
     contextEnabled = false; attachedContextNames = []; showContextDropdown = false;
-    useCustomBinary = false; customBinaryPath = '';
+    useWorktree = true; useCustomBinary = false; customBinaryPath = '';
     binaryProbeResult = { kind: 'idle', msg: '' };
     activeTab = 'general';
   }
@@ -431,6 +433,23 @@
                   </div>
                 </div>
               {/if}
+            </div>
+
+            <!-- Isolated worktree -->
+            <div class="ns-adv-card">
+              <div class="ns-adv-row">
+                <span class="ns-adv-icon" style="background: color-mix(in srgb, #f4a261 14%, transparent); color: #f4a261;">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9v1a6 6 0 01-6 6H9"/></svg>
+                </span>
+                <div class="ns-adv-info">
+                  <span class="ns-adv-title">Isolated worktree</span>
+                  <span class="ns-adv-desc">Create a dedicated git branch and worktree so changes stay isolated from main</span>
+                </div>
+                <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                <button class="ns-toggle" class:on={useWorktree} onclick={() => useWorktree = !useWorktree}>
+                  <span class="ns-toggle-knob"></span>
+                </button>
+              </div>
             </div>
 
             <!-- Custom binary path -->

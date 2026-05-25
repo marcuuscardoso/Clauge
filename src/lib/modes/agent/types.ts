@@ -24,6 +24,8 @@ export interface AgentSession {
    *  fall back to the standard $PATH lookup. Used when the user has
    *  the agent installed somewhere `find_binary` can't reach. */
   binaryPath: string | null;
+  /** 1 = skip automatic git worktree creation; 0 = create worktree (default). */
+  noWorktree: number;
 }
 
 /** Provider ids that map to a `CliRunner` in `runner_for`. */

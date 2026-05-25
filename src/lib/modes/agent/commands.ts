@@ -26,6 +26,9 @@ export const agentCreateSession = (params: {
   /** Absolute path to the CLI binary (when the user picked one in the
    *  Advanced section). Omit / empty string = use $PATH lookup. */
   binaryPath?: string;
+  /** When true, the spawn path skips automatic git worktree creation
+   *  and runs the agent directly in the project root. */
+  noWorktree?: boolean;
 }) => invoke<AgentSession>('agent_create_session', params);
 export const agentUpdateSession = (params: {
   id: string;

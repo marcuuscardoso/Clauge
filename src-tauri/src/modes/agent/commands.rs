@@ -22,6 +22,7 @@ pub async fn agent_create_session(
     git_name: Option<String>, git_email: Option<String>,
     provider: Option<String>,
     binary_path: Option<String>,
+    no_worktree: Option<bool>,
 ) -> Result<AgentSession, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -39,6 +40,7 @@ pub async fn agent_create_session(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let no_wt = if no_worktree.unwrap_or(false) { 1 } else { 0 };
     sessions_repo::insert_session(
         pool.inner(),
         &id,
@@ -54,6 +56,7 @@ pub async fn agent_create_session(
         &now,
         &provider,
         bin,
+        no_wt,
     )
     .await
     .map_err(|e| e.to_string())?;

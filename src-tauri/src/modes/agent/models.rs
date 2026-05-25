@@ -44,6 +44,9 @@ pub struct AgentSession {
     /// non-standard prefix, an asdf/nvm shim path, or a per-project
     /// pinned version. Migration 17 added the column.
     pub binary_path: Option<String>,
+    /// When `1`, the spawn path skips automatic git worktree creation.
+    /// The agent runs directly in `project_path`. Migration 19.
+    pub no_worktree: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
