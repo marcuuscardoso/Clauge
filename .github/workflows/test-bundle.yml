@@ -43,7 +43,7 @@ jobs:
           LINUX_ARM='{"platform":"ubuntu-22.04-arm","args":"","rust-targets":"","label":"linux-arm64"}'
 
           case "${{ inputs.platforms }}" in
-            macos)       INCLUDES="[$MAC_AARCH64,$MAC_X86]" ;;
+            macos)       INCLUDES="[$MAC_AARCH64]" ;;
             windows)     INCLUDES="[$WIN]" ;;
             windows-arm) INCLUDES="[$WIN_ARM]" ;;
             linux)       INCLUDES="[$LINUX]" ;;
