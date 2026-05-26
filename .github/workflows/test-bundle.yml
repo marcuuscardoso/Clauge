@@ -110,7 +110,11 @@ jobs:
           with open('src-tauri/tauri.conf.json', 'w') as f:
               json.dump(cfg, f, indent=2)
           " "$PUBKEY"
-          echo "TAURI_SIGNING_PRIVATE_KEY=$(cat /tmp/clauge-key)" >> "$GITHUB_ENV"
+          {
+            echo 'TAURI_SIGNING_PRIVATE_KEY<<SIGKEY_EOF'
+            cat /tmp/clauge-key
+            echo SIGKEY_EOF
+          } >> "$GITHUB_ENV"
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
 
       - name: Build app
