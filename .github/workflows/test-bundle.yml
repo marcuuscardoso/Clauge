@@ -100,7 +100,7 @@ jobs:
       - name: Generate ephemeral updater signing key
         shell: bash
         run: |
-          bunx tauri signer generate -w /tmp/clauge-key --password ""
+          bunx tauri signer generate -w /tmp/clauge-key -p ""
           PUBKEY=$(cat /tmp/clauge-key.pub)
           python3 -c "
           import json, sys
@@ -110,11 +110,7 @@ jobs:
           with open('src-tauri/tauri.conf.json', 'w') as f:
               json.dump(cfg, f, indent=2)
           " "$PUBKEY"
-          {
-            echo 'TAURI_SIGNING_PRIVATE_KEY<<SIGKEY_EOF'
-            cat /tmp/clauge-key
-            echo SIGKEY_EOF
-          } >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$(base64 < /tmp/clauge-key | tr -d '\n')" >> "$GITHUB_ENV"
           echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
 
       - name: Build app
