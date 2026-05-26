@@ -47,7 +47,6 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -133,7 +132,6 @@ pub fn run() {
             app.manage(modes::explorer::session::ExplorerSessions::default());
             app.manage(modes::explorer::transfers::Transfers::default());
             app.manage(shared::ai::types::PendingFrontendTools::default());
-            app.manage(shared::updater::state::PendingUpdate::default());
 
             // ── Cloud auth + sync scheduler ──────────────────────────
             // Holds provider tokens (loaded from OS keyring) and the per-kind
@@ -267,9 +265,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             shared::platform::install_type::get_install_type,
             shared::platform::install_type::supports_self_update,
-            shared::updater::commands::check_for_update_in_channel,
-            shared::updater::commands::check_latest_version,
-            shared::updater::commands::install_pending_update,
             modes::explorer::connections::explorer_list_connections,
             modes::explorer::connections::explorer_get_connection,
             modes::explorer::connections::explorer_create_connection,

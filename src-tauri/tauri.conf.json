@@ -53,11 +53,6 @@
     }
   },
   "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/ansxuman/Clauge/releases/latest/download/latest.json"
-      ]
-    },
     "deep-link": {
       "desktop": {
         "schemes": ["clauge"]
