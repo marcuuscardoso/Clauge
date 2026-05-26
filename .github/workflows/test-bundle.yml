@@ -97,6 +97,22 @@ jobs:
       - name: Install frontend dependencies
         run: bun install
 
+      - name: Generate ephemeral updater signing key
+        shell: bash
+        run: |
+          bunx tauri signer generate -w /tmp/clauge-key --password ""
+          PUBKEY=$(cat /tmp/clauge-key.pub)
+          python3 -c "
+          import json, sys
+          with open('src-tauri/tauri.conf.json') as f:
+              cfg = json.load(f)
+          cfg['plugins']['updater']['pubkey'] = sys.argv[1]
+          with open('src-tauri/tauri.conf.json', 'w') as f:
+              json.dump(cfg, f, indent=2)
+          " "$PUBKEY"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$(cat /tmp/clauge-key)" >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=" >> "$GITHUB_ENV"
+
       - name: Build app
         # tauri-action with no tagName just runs tauri build — no release is
         # created. Test builds skip Apple cert + notarization (no APPLE_*

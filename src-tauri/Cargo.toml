@@ -51,6 +51,7 @@ dirs = "5"
 flate2 = "1"
 hex = "0.4"
 tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
 # SSH client (pure-Rust, cross-platform)
 russh = "0.45"
 russh-keys = "0.45"

@@ -33,6 +33,7 @@
     "os:default",
     "os:allow-platform",
     "notification:default",
+    "updater:default",
     "core:window:allow-request-user-attention"
   ]
 }

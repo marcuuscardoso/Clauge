@@ -57,6 +57,10 @@
       "desktop": {
         "schemes": ["clauge"]
       }
+    },
+    "updater": {
+      "pubkey": "PLACEHOLDER_REPLACED_AT_BUILD_TIME",
+      "endpoints": []
     }
   }
 }
